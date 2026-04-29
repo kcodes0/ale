@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import signal
 import time
@@ -49,6 +50,7 @@ class AleDiscordClient(discord.Client):
         self._seen_message_ids: set[int] = set()
         self._watchdog: FileWatchdog | None = None
         self._sighup_handler_installed = False
+        self.tree = discord.app_commands.CommandTree(self)
 
     async def setup_hook(self) -> None:
         self.runtime.logger.event("discord", "setup_complete")
@@ -57,6 +59,9 @@ class AleDiscordClient(discord.Client):
             self._watchdog = FileWatchdog(self.runtime.reload_manager, logger=self.runtime.logger)
             await self._watchdog.start()
         self._install_sighup_handler()
+        self._register_slash_commands()
+        await self.tree.sync()
+        self.runtime.logger.event("discord", "slash_commands_synced")
 
     async def close(self) -> None:
         if self._watchdog is not None:
@@ -96,6 +101,147 @@ class AleDiscordClient(discord.Client):
             bot_user_id=getattr(self.user, "id", None),
         )
         LOG.info("Ale connected as %s (%s)", self.user, getattr(self.user, "id", "?"))
+
+    def _register_slash_commands(self) -> None:
+        """Register Discord application (slash) commands."""
+
+        @self.tree.command(name="engineer", description="Invoke Ale's Engineer agent")
+        @discord.app_commands.describe(prompt="What you want the Engineer to do")
+        async def engineer(interaction: discord.Interaction, prompt: str) -> None:
+            await self._handle_engineer_command(interaction, prompt)
+
+    async def _handle_engineer_command(
+        self, interaction: discord.Interaction, prompt: str
+    ) -> None:
+        """Handle the /engineer slash command."""
+        self.runtime.logger.event(
+            "discord",
+            "slash_command_received",
+            command="engineer",
+            author_id=interaction.user.id,
+            channel_id=interaction.channel_id,
+            prompt_chars=len(prompt),
+        )
+
+        if self.settings.allowed_user_ids and interaction.user.id not in self.settings.allowed_user_ids:
+            await interaction.response.send_message("Not authorized.", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+        content = prompt.strip()
+
+        # Use router for thread continuity, then force engineer persona.
+        # RouteDecision is a frozen dataclass — replace() instead of mutating.
+        route = await self.runtime.router.route(
+            content,
+            discord_channel_id=str(interaction.channel_id),
+            discord_user_id=interaction.user.id,
+        )
+        route = dataclasses.replace(route, persona="engineer")
+
+        self.runtime.logger.event(
+            "discord",
+            "slash_command_routed",
+            command="engineer",
+            thread_id=route.thread_id,
+            route_reason=route.reason,
+            is_new=route.is_new,
+        )
+
+        async with self.runtime.threads.lock_for(route.thread_id):
+            if route.is_new or not self.runtime.threads.exists(route.thread_id):
+                state = self.runtime.threads.create(
+                    content.splitlines()[0][:80] if content else "Engineer task",
+                    thread_id=route.thread_id,
+                    discord_channel_id=str(interaction.channel_id),
+                    discord_user_id=interaction.user.id,
+                    persona="engineer",
+                )
+            else:
+                state = self.runtime.threads.load(route.thread_id)
+                state.meta.persona = "engineer"
+                self.runtime.threads.save_meta(state.meta)
+
+            chat_message = ChatMessage(
+                role="user",
+                content=content,
+                discord_message_id=str(interaction.id),
+                author_id=interaction.user.id,
+                author_name=interaction.user.display_name,
+                attachments=[],
+            )
+            self.runtime.threads.append_message(state.meta.thread_id, chat_message)
+            state = self.runtime.threads.load(state.meta.thread_id)
+
+            progress_last_sent = 0.0
+            progress_sent: set[str] = set()
+
+            async def send_progress(update: str) -> None:
+                nonlocal progress_last_sent
+                if update in progress_sent:
+                    return
+                now = time.monotonic()
+                if progress_last_sent and (
+                    now - progress_last_sent < self.settings.specialist_progress_min_seconds
+                ):
+                    return
+                progress_last_sent = now
+                progress_sent.add(update)
+                await interaction.followup.send(update)
+                self.runtime.logger.event(
+                    "discord",
+                    "progress_sent",
+                    thread_id=state.meta.thread_id,
+                    persona="engineer",
+                    update=update,
+                )
+
+            try:
+                response = await self.runtime.agent.respond(
+                    state=state,
+                    user_message=chat_message,
+                    route=route,
+                    progress_callback=send_progress,
+                )
+            except Exception as exc:
+                await interaction.followup.send(
+                    "I hit an internal error while running the Engineer."
+                )
+                self.runtime.logger.event(
+                    "discord",
+                    "slash_command_failed",
+                    command="engineer",
+                    thread_id=state.meta.thread_id,
+                    error_type=type(exc).__name__,
+                )
+                LOG.exception("Engineer slash command failed")
+                return
+
+            if response.text and response.text != "NO_REPLY":
+                for chunk in split_for_discord(
+                    response.text, self.settings.discord_reply_limit
+                ):
+                    await interaction.followup.send(chunk)
+                    self.runtime.logger.event(
+                        "discord",
+                        "message_sent",
+                        thread_id=state.meta.thread_id,
+                        chunk_chars=len(chunk),
+                    )
+                self.runtime.threads.append_message(
+                    state.meta.thread_id,
+                    ChatMessage(role="assistant", content=response.text),
+                )
+            else:
+                await interaction.followup.send("Done — nothing to report.")
+                self.runtime.logger.event(
+                    "discord", "no_reply", thread_id=state.meta.thread_id
+                )
+
+        asyncio.create_task(self.runtime.refresh_if_needed(route.thread_id))
+        self.runtime.logger.event(
+            "discord", "recap_refresh_scheduled", thread_id=route.thread_id
+        )
 
     async def send_dm(self, user_id: int, message: str) -> None:
         self.runtime.logger.event("discord", "dm_started", user_id=user_id, chars=len(message))

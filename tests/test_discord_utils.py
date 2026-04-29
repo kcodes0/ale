@@ -1,8 +1,14 @@
+import dataclasses
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from ale.agent import _fallback_summary
 from ale.artifacts import build_publish_command, should_send_as_artifact, write_markdown_artifact
+from ale.config import Settings
 from ale.discord_app import split_for_discord
+from ale.models import RouteDecision
 from ale.reports import render_report_pdf
 
 
@@ -85,3 +91,48 @@ def test_fallback_summary_truncates_and_marks_unavailable():
 
 def test_fallback_summary_handles_empty_text():
     assert "PDF is empty" in _fallback_summary("")
+
+
+def test_route_decision_replace_overrides_persona():
+    """Guards the /engineer slash command path: RouteDecision is frozen, so
+    the handler must use dataclasses.replace, not in-place mutation, to force
+    the engineer persona after routing."""
+
+    route = RouteDecision(
+        thread_id="t1", persona="actor", confidence=0.6, reason="x", is_new=False
+    )
+    overridden = dataclasses.replace(route, persona="engineer")
+
+    assert overridden.persona == "engineer"
+    assert route.persona == "actor"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        route.persona = "engineer"  # type: ignore[misc]
+
+
+async def test_engineer_slash_command_rejects_disallowed_user():
+    """Allowlist must block before the handler defers or runs the agent."""
+
+    from ale.discord_app import AleDiscordClient
+
+    client = AleDiscordClient.__new__(AleDiscordClient)
+    client.settings = Settings(
+        discord_token=None,
+        anthropic_api_key=None,
+        allowed_user_ids=frozenset({42}),
+    )
+    client.runtime = MagicMock()
+    client.runtime.logger = MagicMock()
+
+    interaction = MagicMock()
+    interaction.user.id = 999
+    interaction.channel_id = 1
+    interaction.response.send_message = AsyncMock()
+    interaction.response.defer = AsyncMock()
+
+    await AleDiscordClient._handle_engineer_command(client, interaction, "do a thing")
+
+    interaction.response.send_message.assert_awaited_once()
+    args, kwargs = interaction.response.send_message.await_args
+    assert "Not authorized" in args[0]
+    assert kwargs.get("ephemeral") is True
+    interaction.response.defer.assert_not_awaited()

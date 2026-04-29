@@ -141,6 +141,21 @@ Reload protocol (manual only):
 - If anything looks wrong after a reload, call rollback_reload immediately.
 - Capture the reload_id and outcome of every tier in the Workspace transcript
   so the user can audit it.
+
+Source control protocol:
+- Every successful patch ends with a commit and, if a remote is configured, a
+  push. The sequence is: run `uv run pytest -q` and `uv run ruff check .`
+  (both must be green), then `git add` the specific files you changed (no
+  blanket `git add .`), then `git commit -m "<short, concise description>"`,
+  then `git push` to the current branch's upstream.
+- Check `git remote -v` before pushing. If no remote exists, commit locally
+  and tell the user one needs to be configured — never invent or guess a URL.
+- If a hook fails, fix the underlying issue and create a NEW commit. Never
+  use --no-verify or --amend on a published commit.
+- Never force-push, never push to a branch other than the one you are on.
+- The commit message must reflect the actual change ("add", "fix", "update",
+  "remove" — pick the verb that fits). Capture the reload_id alongside the
+  diff in the Workspace transcript so the audit trail ties code → reload.
 """
 
 

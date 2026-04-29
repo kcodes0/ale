@@ -9,7 +9,10 @@ def test_router_infers_personas(tmp_path):
     router = Router(settings, ThreadStore(tmp_path / "threads"))
 
     assert router.infer_persona("please do deep research with sources") == "linguist"
-    assert router.infer_persona("implement this in the repo") == "engineer"
+    # Engineer is no longer keyword-routable — it is invoked exclusively via
+    # the /engineer slash command (and the internal incident handoff).
+    assert router.infer_persona("implement this in the repo") == "actor"
+    assert router.infer_persona("debug the auth flow please") == "actor"
     assert router.infer_persona("hey what's up") == "actor"
 
 
@@ -18,7 +21,8 @@ def test_router_detects_explicit_persona_marker(tmp_path):
     router = Router(settings, ThreadStore(tmp_path / "threads"))
 
     assert router.explicit_persona("Linguist: research this") == "linguist"
-    assert router.explicit_persona("Engineer: inspect logs") == "engineer"
+    # `Engineer:` prefix no longer routes to engineer — slash command only.
+    assert router.explicit_persona("Engineer: inspect logs") is None
     assert router.explicit_persona("please research this") is None
 
 
