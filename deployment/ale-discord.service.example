@@ -1,0 +1,24 @@
+[Unit]
+Description=Ale Discord agent harness
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/Users/jason/Code/Ale
+ExecStart=/Users/jason/Code/Ale/.venv/bin/ale discord
+Restart=always
+RestartSec=15
+Environment=PYTHONUNBUFFERED=1
+Environment=DISCORD_TOKEN_FILE=/Users/jason/.config/ale/discord-token
+Environment=ALE_ALLOWED_USER_IDS=
+Environment=ALE_DISCORD_MESSAGE_CONTENT_INTENT=false
+Environment=ALE_ENABLE_LLM_ROUTER=true
+Environment=ALE_ENABLE_BASH_TOOL=false
+Environment=ALE_ENABLE_CODEX_EXEC=false
+Environment=ALE_CODEX_TIMEOUT_SECONDS=1800
+StandardOutput=append:/Users/jason/.local/state/ale/logs/service.log
+StandardError=inherit
+
+[Install]
+WantedBy=default.target
