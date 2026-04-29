@@ -113,7 +113,7 @@ class ReloadManager:
         self._in_flight_turns = 0
         self._turn_idle = asyncio.Event()
         self._turn_idle.set()
-        self._snapshot = self._capture_snapshot(settings)
+        self._snapshot = self._capture_snapshot(settings, reload_prompts=False)
         self._previous_snapshot: ReloadSnapshot | None = None
         self._history: list[ReloadResult] = []
         self._max_history = 64
@@ -450,7 +450,7 @@ class ReloadManager:
             "stderr_tail": proc.stderr[-2000:],
         }
 
-    def _capture_snapshot(self, settings: Settings) -> ReloadSnapshot:
+    def _capture_snapshot(self, settings: Settings, *, reload_prompts: bool = True) -> ReloadSnapshot:
         # Reload only modules that aren't owning a currently-running coroutine.
         # ``ale.agent`` is *not* reloaded — its respond() holds module globals
         # whose mid-flight rebinding crashes the bundled Claude CLI subprocess.
@@ -458,8 +458,9 @@ class ReloadManager:
         import ale.prompts as prompts_module
         import ale.tools as tools_module
 
-        importlib.reload(prompts_module)
-        importlib.reload(personas_module)
+        if reload_prompts:
+            importlib.reload(prompts_module)
+            importlib.reload(personas_module)
 
         return ReloadSnapshot(
             settings=settings,

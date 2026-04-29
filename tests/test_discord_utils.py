@@ -7,7 +7,7 @@ import pytest
 from ale.agent import _fallback_summary
 from ale.artifacts import build_publish_command, should_send_as_artifact, write_markdown_artifact
 from ale.config import Settings
-from ale.discord_app import split_for_discord
+from ale.discord_app import DISCORD_COMMAND_SCHEMA_VERSION, AleDiscordClient, split_for_discord
 from ale.models import RouteDecision
 from ale.reports import render_report_pdf
 
@@ -132,7 +132,51 @@ async def test_engineer_slash_command_rejects_disallowed_user():
     await AleDiscordClient._handle_engineer_command(client, interaction, "do a thing")
 
     interaction.response.send_message.assert_awaited_once()
+    assert interaction.response.send_message.await_args is not None
     args, kwargs = interaction.response.send_message.await_args
     assert "Not authorized" in args[0]
     assert kwargs.get("ephemeral") is True
     interaction.response.defer.assert_not_awaited()
+
+
+async def test_slash_command_sync_auto_skips_when_marker_is_current(tmp_path):
+    client = AleDiscordClient.__new__(AleDiscordClient)
+    client.settings = Settings(
+        discord_token=None,
+        anthropic_api_key=None,
+        state_dir=tmp_path,
+        discord_sync_commands="auto",
+    )
+    client.runtime = MagicMock()
+    client.runtime.logger = MagicMock()
+    client.tree = MagicMock()
+    client.tree.sync = AsyncMock()
+    (tmp_path / "discord-commands.json").write_text(
+        f'{{"schema_version": "{DISCORD_COMMAND_SCHEMA_VERSION}"}}\n',
+        encoding="utf-8",
+    )
+
+    await AleDiscordClient._sync_slash_commands_if_needed(client)
+
+    client.tree.sync.assert_not_awaited()
+
+
+async def test_slash_command_sync_auto_writes_marker_when_missing(tmp_path):
+    client = AleDiscordClient.__new__(AleDiscordClient)
+    client.settings = Settings(
+        discord_token=None,
+        anthropic_api_key=None,
+        state_dir=tmp_path,
+        discord_sync_commands="auto",
+    )
+    client.runtime = MagicMock()
+    client.runtime.logger = MagicMock()
+    client.tree = MagicMock()
+    client.tree.sync = AsyncMock(return_value=[object()])
+
+    await AleDiscordClient._sync_slash_commands_if_needed(client)
+
+    client.tree.sync.assert_awaited_once()
+    assert DISCORD_COMMAND_SCHEMA_VERSION in (tmp_path / "discord-commands.json").read_text(
+        encoding="utf-8"
+    )

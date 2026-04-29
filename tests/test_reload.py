@@ -24,6 +24,22 @@ def _make_manager(settings: Settings, tmp_path: Path) -> ReloadManager:
     return ReloadManager(settings, logger=logger)
 
 
+def test_manager_initial_snapshot_does_not_reload_modules(
+    tmp_path, isolated_settings, monkeypatch
+):
+    calls = []
+
+    def fake_reload(module):
+        calls.append(module.__name__)
+        return module
+
+    monkeypatch.setattr("ale.reload.importlib.reload", fake_reload)
+
+    _make_manager(isolated_settings, tmp_path)
+
+    assert calls == []
+
+
 async def test_reload_config_records_history(tmp_path, isolated_settings):
     manager = _make_manager(isolated_settings, tmp_path)
 

@@ -19,7 +19,7 @@ Default models:
 ## Quickstart
 
 ```bash
-git clone <this repo>
+git clone https://github.com/kcodes0/ale.git
 cd Ale
 uv sync
 uv run ale onboard
@@ -32,8 +32,10 @@ remote so Engineer can commit and push. Re-running it is safe: existing
 values in `.env` are preserved unless you overwrite them.
 
 The first time you start the gateway after onboarding, Discord registers the
-`/engineer` slash command. After that, hot-reloading the harness keeps the
-handler body fresh, but command registration is a one-time-per-deploy thing.
+`/engineer` slash command. `ALE_DISCORD_SYNC_COMMANDS=auto` records a local
+sync marker under the state directory so normal restarts do not burn Discord's
+global command-sync quota. Use `always` after changing command definitions, or
+`never` when commands are managed elsewhere.
 
 Local one-shot smoke test (no Discord):
 
@@ -107,6 +109,13 @@ Relevant env vars: `ALE_HOT_RELOAD_ENABLED` (default `false`),
 `ALE_RELOAD_WATCH_PATHS` (`ale`), `ALE_RELOAD_DEBOUNCE_SECONDS` (`1.5`),
 `ALE_RELOAD_POLL_INTERVAL_SECONDS` (`1.0`),
 `ALE_RELOAD_HEALTH_CHECK_TIMEOUT_SECONDS` (`60`), `ALE_CANDIDATE_PYTHON`.
+
+## Operations
+
+Logs rotate in-process before writes once a file reaches `ALE_LOG_MAX_BYTES`
+(default 10000000), keeping `ALE_LOG_BACKUP_COUNT` backups (default 5). For
+long-lived hosts, an external supervisor-level log policy is still useful for
+stdout/stderr and system logs.
 
 ## Failure Recovery
 

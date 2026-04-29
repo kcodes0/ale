@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
 import signal
 import time
@@ -19,6 +20,7 @@ from ale.reports import render_report_pdf
 from ale.service import AleRuntime
 
 LOG = logging.getLogger(__name__)
+DISCORD_COMMAND_SCHEMA_VERSION = "engineer-v1"
 
 
 def split_for_discord(text: str, limit: int) -> Iterable[str]:
@@ -60,8 +62,7 @@ class AleDiscordClient(discord.Client):
             await self._watchdog.start()
         self._install_sighup_handler()
         self._register_slash_commands()
-        await self.tree.sync()
-        self.runtime.logger.event("discord", "slash_commands_synced")
+        await self._sync_slash_commands_if_needed()
 
     async def close(self) -> None:
         if self._watchdog is not None:
@@ -109,6 +110,69 @@ class AleDiscordClient(discord.Client):
         @discord.app_commands.describe(prompt="What you want the Engineer to do")
         async def engineer(interaction: discord.Interaction, prompt: str) -> None:
             await self._handle_engineer_command(interaction, prompt)
+
+    async def _sync_slash_commands_if_needed(self) -> None:
+        """Sync slash commands without burning a global Discord sync every boot."""
+
+        mode = (self.settings.discord_sync_commands or "auto").lower()
+        marker = self.settings.state_dir / "discord-commands.json"
+        should_sync = mode in {"1", "true", "yes", "always"}
+        if mode in {"0", "false", "no", "never", "off"}:
+            self.runtime.logger.event("discord", "slash_command_sync_skipped", mode=mode)
+            return
+        if mode == "auto":
+            try:
+                data = json.loads(marker.read_text(encoding="utf-8")) if marker.exists() else {}
+            except (OSError, json.JSONDecodeError):
+                data = {}
+            should_sync = data.get("schema_version") != DISCORD_COMMAND_SCHEMA_VERSION
+        if not should_sync:
+            self.runtime.logger.event(
+                "discord",
+                "slash_command_sync_skipped",
+                mode=mode,
+                schema_version=DISCORD_COMMAND_SCHEMA_VERSION,
+            )
+            return
+        try:
+            synced = await self.tree.sync()
+        except Exception as exc:
+            self.runtime.logger.exception(
+                "discord",
+                "slash_command_sync_failed",
+                exc,
+                mode=mode,
+                schema_version=DISCORD_COMMAND_SCHEMA_VERSION,
+            )
+            LOG.exception("Ale could not sync Discord slash commands")
+            return
+        try:
+            marker.write_text(
+                json.dumps(
+                    {
+                        "schema_version": DISCORD_COMMAND_SCHEMA_VERSION,
+                        "synced_at": time.time(),
+                        "command_count": len(synced),
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            self.runtime.logger.exception(
+                "discord",
+                "slash_command_sync_marker_failed",
+                exc,
+                marker_path=str(marker),
+            )
+        self.runtime.logger.event(
+            "discord",
+            "slash_commands_synced",
+            mode=mode,
+            schema_version=DISCORD_COMMAND_SCHEMA_VERSION,
+            command_count=len(synced),
+        )
 
     async def _handle_engineer_command(
         self, interaction: discord.Interaction, prompt: str
@@ -510,7 +574,10 @@ class AleDiscordClient(discord.Client):
             body = f"{body}\n\nFull report attached as `{artifact_path.name}`."
         body = body[: self.settings.discord_reply_limit]
 
-        await message.channel.send(body, files=attachments or None)
+        if attachments:
+            await message.channel.send(body, files=attachments)
+        else:
+            await message.channel.send(body)
         self.runtime.logger.event(
             "discord",
             "specialist_summary_sent",

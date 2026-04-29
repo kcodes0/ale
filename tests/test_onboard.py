@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from ale.onboard import (
+    DEFAULT_ENV_VALUES,
     EnvFile,
     _looks_like_discord_token,
     _looks_like_git_url,
@@ -54,6 +55,24 @@ def test_envfile_write_is_chmod_600(tmp_path: Path):
 
     mode = path.stat().st_mode & 0o777
     assert mode == 0o600
+
+
+def test_envfile_ensure_default_preserves_existing_value(tmp_path: Path):
+    path = tmp_path / ".env"
+    path.write_text("ALE_ENABLE_BASH_TOOL=true\n", encoding="utf-8")
+    env = EnvFile.load(path)
+
+    added = env.ensure_default("ALE_ENABLE_BASH_TOOL", "false")
+
+    assert added is False
+    assert env.get("ALE_ENABLE_BASH_TOOL") == "true"
+
+
+def test_onboarding_default_env_values_are_safe():
+    assert DEFAULT_ENV_VALUES["ALE_ENABLE_BASH_TOOL"] == "false"
+    assert DEFAULT_ENV_VALUES["ALE_ENABLE_CODEX_EXEC"] == "false"
+    assert DEFAULT_ENV_VALUES["ALE_HOT_RELOAD_ENABLED"] == "false"
+    assert DEFAULT_ENV_VALUES["ALE_DISCORD_SYNC_COMMANDS"] == "auto"
 
 
 def test_discord_token_validator():

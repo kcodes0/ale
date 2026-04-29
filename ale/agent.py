@@ -9,7 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, cast
 
 from ale.config import Settings
 from ale.memory import MemoryStore
@@ -136,7 +136,6 @@ class AleAgent:
         )
         options = self._build_options(persona.name, snapshot=snapshot)
         tool_calls: list[str] = []
-        tool_started_at: dict[str, float] = {}
         text_chunks: list[str] = []
         result: Any | None = None
 
@@ -144,44 +143,19 @@ class AleAgent:
         try:
             try:
                 async for message in query(prompt=prompt, options=options):
-                    if AssistantMessage is not None and isinstance(message, AssistantMessage):
-                        for block in message.content:
-                            if TextBlock is not None and isinstance(block, TextBlock):
-                                text_chunks.append(block.text)
-                            elif ToolUseBlock is not None and isinstance(block, ToolUseBlock):
-                                tool_calls.append(block.name)
-                                tool_started_at[f"{block.name}#{len(tool_calls)}"] = time.monotonic()
-                                args_summary = _summarize_tool_args(getattr(block, "input", None))
-                                if progress_callback and persona.name in {"linguist", "engineer"}:
-                                    await progress_callback(
-                                        specialist_progress_message(
-                                            persona.name, block.name, len(tool_calls)
-                                        )
-                                    )
-                                self.logger.event(
-                                    "agent",
-                                    "tool_requested",
-                                    turn_id=turn_id,
-                                    thread_id=state.meta.thread_id,
-                                    persona=persona.name,
-                                    agent_role=agent_role,
-                                    team=team_label,
-                                    tool_index=len(tool_calls),
-                                    tool_name=block.name,
-                                    tool_args_summary=args_summary,
-                                )
-                                if persona.name in {"linguist", "engineer"}:
-                                    self.logger.team(
-                                        "tool_requested",
-                                        turn_id=turn_id,
-                                        thread_id=state.meta.thread_id,
-                                        team=team_label,
-                                        tool_name=block.name,
-                                        tool_index=len(tool_calls),
-                                        tool_args_summary=args_summary,
-                                    )
-                    if ResultMessage is not None and isinstance(message, ResultMessage):
-                        result = message
+                    maybe_result = await self._consume_query_message(
+                        message,
+                        state=state,
+                        persona_name=persona.name,
+                        agent_role=agent_role,
+                        team_label=team_label,
+                        turn_id=turn_id,
+                        progress_callback=progress_callback,
+                        tool_calls=tool_calls,
+                        text_chunks=text_chunks,
+                    )
+                    if maybe_result is not None:
+                        result = maybe_result
             except Exception as exc:
                 duration_ms = int((time.monotonic() - started_at) * 1000)
                 self.logger.exception(
@@ -277,6 +251,80 @@ class AleAgent:
             return response
         finally:
             self.reload_manager.turn_ended()
+
+    async def _consume_query_message(
+        self,
+        message: Any,
+        *,
+        state: ThreadState,
+        persona_name: str,
+        agent_role: str,
+        team_label: str,
+        turn_id: str,
+        progress_callback: Callable[[str], Awaitable[None]] | None,
+        tool_calls: list[str],
+        text_chunks: list[str],
+    ) -> Any | None:
+        if AssistantMessage is not None and isinstance(message, AssistantMessage):
+            for block in message.content:
+                if TextBlock is not None and isinstance(block, TextBlock):
+                    text_chunks.append(block.text)
+                elif ToolUseBlock is not None and isinstance(block, ToolUseBlock):
+                    await self._record_tool_request(
+                        block,
+                        state=state,
+                        persona_name=persona_name,
+                        agent_role=agent_role,
+                        team_label=team_label,
+                        turn_id=turn_id,
+                        progress_callback=progress_callback,
+                        tool_calls=tool_calls,
+                    )
+        if ResultMessage is not None and isinstance(message, ResultMessage):
+            return message
+        return None
+
+    async def _record_tool_request(
+        self,
+        block: Any,
+        *,
+        state: ThreadState,
+        persona_name: str,
+        agent_role: str,
+        team_label: str,
+        turn_id: str,
+        progress_callback: Callable[[str], Awaitable[None]] | None,
+        tool_calls: list[str],
+    ) -> None:
+        tool_calls.append(block.name)
+        tool_index = len(tool_calls)
+        args_summary = summarize_tool_args(getattr(block, "input", None))
+        if progress_callback and persona_name in {"linguist", "engineer"}:
+            await progress_callback(
+                specialist_progress_message(persona_name, block.name, tool_index)
+            )
+        self.logger.event(
+            "agent",
+            "tool_requested",
+            turn_id=turn_id,
+            thread_id=state.meta.thread_id,
+            persona=persona_name,
+            agent_role=agent_role,
+            team=team_label,
+            tool_index=tool_index,
+            tool_name=block.name,
+            tool_args_summary=args_summary,
+        )
+        if persona_name in {"linguist", "engineer"}:
+            self.logger.team(
+                "tool_requested",
+                turn_id=turn_id,
+                thread_id=state.meta.thread_id,
+                team=team_label,
+                tool_name=block.name,
+                tool_index=tool_index,
+                tool_args_summary=args_summary,
+            )
 
     async def summarize_for_discord(
         self,
@@ -399,6 +447,7 @@ Full {source_persona.title()} report:
             self.reload_manager.turn_ended()
 
     def _build_options(self, persona: str, *, snapshot: Any) -> Any:
+        assert ClaudeAgentOptions is not None
         from ale.tools import build_ale_mcp_server
 
         # If hot_reload_tools is on, the module may have been reloaded since boot.
@@ -408,7 +457,7 @@ Full {source_persona.title()} report:
 
             build_ale_mcp_server = importlib.import_module(tools_module.__name__).build_ale_mcp_server
 
-        mcp_server = build_ale_mcp_server(
+        mcp_server: Any = build_ale_mcp_server(
             settings=snapshot.settings,
             threads=self.threads,
             memory=self.memory,
@@ -462,7 +511,7 @@ Full {source_persona.title()} report:
             tools=tools,
             allowed_tools=allowed,
             permission_mode=permission_mode,
-            mcp_servers={"ale": mcp_server},
+            mcp_servers=cast(Any, {"ale": mcp_server}),
             agents=snapshot.sdk_subagents_factory(),
             model=self._model_for(persona),
             cwd=snapshot.settings.work_dir,
@@ -587,7 +636,7 @@ def _fallback_summary(full_text: str, *, max_chars: int = 1400) -> str:
     return head + "\n\n(Full report attached as PDF — Actor summary unavailable.)"
 
 
-def _summarize_tool_args(args: Any, *, max_len: int = 200) -> str:
+def summarize_tool_args(args: Any, *, max_len: int = 200) -> str:
     """Compact preview of a tool input for the agent log."""
 
     if args is None:
@@ -609,3 +658,7 @@ def _summarize_tool_args(args: Any, *, max_len: int = 200) -> str:
         rendered = ", ".join(bits)
         return rendered[:max_len] + ("…" if len(rendered) > max_len else "")
     return repr(args)[:max_len]
+
+
+# Backward-compatible alias for older tests/imports.
+_summarize_tool_args = summarize_tool_args

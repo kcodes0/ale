@@ -24,13 +24,11 @@ except Exception:  # pragma: no cover - tests can import without SDK installed.
 PERSONA_MARKERS = {
     "actor": re.compile(r"(^|\s)@?(actor|chat)\b", re.IGNORECASE),
     "linguist": re.compile(r"(^|\s)@?(linguist|research|synthesis)\b", re.IGNORECASE),
-    "engineer": re.compile(r"(^|\s)@?(engineer|code|implement|debug|deploy)\b", re.IGNORECASE),
 }
 
 EXPLICIT_PERSONA_MARKERS = {
     "actor": re.compile(r"^\s*@?(actor|chat)\s*:", re.IGNORECASE),
     "linguist": re.compile(r"^\s*@?(linguist|research|synthesis)\s*:", re.IGNORECASE),
-    "engineer": re.compile(r"^\s*@?(engineer|code|implement|debug|deploy)\s*:", re.IGNORECASE),
 }
 
 
@@ -55,8 +53,7 @@ class Router:
         lowered = content.lower()
         if any(word in lowered for word in ("deep research", "sources", "cite", "literature review")):
             return "linguist"
-        if any(word in lowered for word in ("implement", "fix", "code", "deploy", "test", "repo")):
-            return "engineer"
+        # Engineer is only invoked via /engineer slash command (or internal harness).
         for persona, pattern in PERSONA_MARKERS.items():
             if pattern.search(content):
                 return persona

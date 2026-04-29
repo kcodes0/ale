@@ -10,6 +10,7 @@ non-zero git remote is never overwritten without confirmation.
 from __future__ import annotations
 
 import getpass
+import os
 import re
 import shutil
 import subprocess
@@ -34,6 +35,17 @@ CYAN = _ansi("36")
 GREEN = _ansi("32")
 RED = _ansi("31")
 YELLOW = _ansi("33")
+
+DEFAULT_ENV_VALUES = {
+    "ALE_DISCORD_MESSAGE_CONTENT_INTENT": "false",
+    "ALE_DISCORD_SYNC_COMMANDS": "auto",
+    "ALE_ENABLE_LLM_ROUTER": "true",
+    "ALE_ENABLE_BASH_TOOL": "false",
+    "ALE_ENABLE_CODEX_EXEC": "false",
+    "ALE_HOT_RELOAD_ENABLED": "false",
+    "ALE_LOG_MAX_BYTES": "10000000",
+    "ALE_LOG_BACKUP_COUNT": "5",
+}
 
 
 def _print_banner() -> None:
@@ -145,14 +157,23 @@ class EnvFile:
             self.lines.append("")
         self.lines.append(replacement)
 
-    def write(self) -> None:
+    def ensure_default(self, key: str, value: str) -> bool:
+        if self.get(key) is not None:
+            return False
+        self.set(key, value)
+        return True
+
+    def write(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         body = "\n".join(self.lines).rstrip() + "\n"
         self.path.write_text(body, encoding="utf-8")
+        if os.name == "nt":
+            return False
         try:
             self.path.chmod(0o600)
+            return True
         except OSError:
-            pass
+            return False
 
 
 # ----- validators -------------------------------------------------------------
@@ -248,7 +269,7 @@ def run_onboarding(repo_root: Path | None = None) -> int:
         _hint("An existing .env was found — values you skip will be preserved.")
     print()
 
-    total = 4
+    total = 5
 
     # 1) Discord bot token --------------------------------------------------
     _section(1, total, "Discord bot token")
@@ -299,8 +320,24 @@ def run_onboarding(repo_root: Path | None = None) -> int:
     env.set("ALE_ALLOWED_USER_IDS", ",".join(ids))
     print()
 
-    # 3) Git remote ---------------------------------------------------------
-    _section(3, total, f"Git remote {DIM}(optional){RESET}")
+    # 3) Safe runtime defaults ---------------------------------------------
+    _section(3, total, "Runtime defaults")
+    _hint(
+        "Ale writes explicit safe defaults so a fresh .env is self-documenting:\n"
+        "custom bash/codex_exec stay off, hot reload stays manual, Discord\n"
+        "slash commands sync once per command schema, and logs rotate locally."
+    )
+    added_defaults = [
+        key for key, value in DEFAULT_ENV_VALUES.items() if env.ensure_default(key, value)
+    ]
+    if added_defaults:
+        _ok(f"will add {len(added_defaults)} default settings")
+    else:
+        _ok("existing runtime settings preserved")
+    print()
+
+    # 4) Git remote ---------------------------------------------------------
+    _section(4, total, f"Git remote {DIM}(optional){RESET}")
     _hint(
         "When set, Engineer commits and pushes here after a successful patch.\n"
         "Accepted forms: https://github.com/user/repo.git, git@github.com:user/repo.git\n"
@@ -328,12 +365,14 @@ def run_onboarding(repo_root: Path | None = None) -> int:
         _warn("git is not installed — skipping remote setup.")
     print()
 
-    # 4) Review -------------------------------------------------------------
-    _section(4, total, "Review")
+    # 5) Review -------------------------------------------------------------
+    _section(5, total, "Review")
     print(f"  {DIM}Will write{RESET} {env_path}")
     masked = "…" + token[-6:] if token else ""
     print(f"    DISCORD_TOKEN={masked}")
     print(f"    ALE_ALLOWED_USER_IDS={','.join(ids)}")
+    for key in DEFAULT_ENV_VALUES:
+        print(f"    {key}={env.get(key)}")
     if git_url:
         action = "update" if existing_remote else "add"
         print(f"  {DIM}Will{RESET} {action} git remote 'origin' → {git_url}")
@@ -344,8 +383,10 @@ def run_onboarding(repo_root: Path | None = None) -> int:
 
     # Apply -----------------------------------------------------------------
     print()
-    env.write()
+    secure_permissions = env.write()
     _ok(f"wrote {env_path}")
+    if not secure_permissions:
+        _warn(f"could not enforce chmod 600 on {env_path}; check file permissions manually")
     if git_url:
         success, message = _set_remote(repo_root, git_url)
         if success:

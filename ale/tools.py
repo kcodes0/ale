@@ -7,11 +7,17 @@ import html
 import json
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
+from urllib.parse import urlparse
 
 import httpx
 
-from ale.codex_harness import CodexExecRequest, build_codex_command
+from ale.codex_harness import (
+    CodexExecRequest,
+    CodexPermissionMode,
+    CodexSandboxMode,
+    build_codex_command,
+)
 from ale.config import Settings
 from ale.memory import MemoryStore
 from ale.observability import EventLogger
@@ -43,6 +49,36 @@ def _missing_sdk_server() -> object:
 def _looks_like_json(line: str) -> bool:
     line = line.strip()
     return line.startswith("{") and line.endswith("}")
+
+
+def _required_str(args: dict[str, Any], key: str) -> str:
+    value = args.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{key} must be a non-empty string")
+    return value.strip()
+
+
+def _public_http_url(raw: str) -> str:
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("url must be an http(s) URL")
+    return raw
+
+
+def _optional_str(args: dict[str, Any], key: str) -> str | None:
+    value = args.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{key} must be a string")
+    return value
+
+
+def _enum_arg(args: dict[str, Any], key: str, default: str, allowed: set[str]) -> str:
+    value = args.get(key, default)
+    if value not in allowed:
+        raise ValueError(f"{key} must be one of {', '.join(sorted(allowed))}")
+    return str(value)
 
 
 def build_ale_mcp_server(
@@ -278,14 +314,15 @@ def build_ale_mcp_server(
     async def web_fetch(args: dict[str, Any]) -> dict[str, Any]:
         log("web_fetch_called", url=args.get("url"))
         try:
+            url = _public_http_url(_required_str(args, "url"))
             async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-                response = await client.get(args["url"])
+                response = await client.get(url)
             response.raise_for_status()
             text = response.text[:32768]
             return text_result(
                 f"URL: {response.url}\nStatus: {response.status_code}\n\n{html.unescape(text)}"
             )
-        except Exception as exc:
+        except (ValueError, httpx.HTTPStatusError, httpx.RequestError) as exc:
             log("web_fetch_failed", url=args.get("url"), error_type=type(exc).__name__, error=str(exc))
             return text_result(f"Could not fetch URL: {exc}", is_error=True)
 
@@ -341,10 +378,10 @@ def build_ale_mcp_server(
         log("bash_called", command=str(args.get("command", ""))[:500])
         if not settings.enable_bash_tool:
             return text_result("Ale bash tool is disabled by configuration.", is_error=True)
-        command = str(args["command"])
-        if "sudo" in command.split():
-            return text_result("sudo is not allowed in Ale's restricted bash tool.", is_error=True)
         try:
+            command = _required_str(args, "command")
+            if "sudo" in command.split():
+                return text_result("sudo is not allowed in Ale's restricted bash tool.", is_error=True)
             proc = await asyncio.to_thread(
                 subprocess.run,
                 command,
@@ -357,7 +394,10 @@ def build_ale_mcp_server(
             )
             output = (proc.stdout + proc.stderr)[-12000:]
             return text_result(f"Exit code: {proc.returncode}\n{output}")
-        except Exception as exc:
+        except subprocess.TimeoutExpired as exc:
+            log("bash_failed", error_type=type(exc).__name__, error=str(exc))
+            return text_result("Bash timed out after 60 seconds.", is_error=True)
+        except (OSError, ValueError) as exc:
             log("bash_failed", error_type=type(exc).__name__, error=str(exc))
             return text_result(f"Bash failed: {exc}", is_error=True)
 
@@ -392,30 +432,47 @@ def build_ale_mcp_server(
             sandbox=args.get("sandbox", "workspace-write"),
             workspace_id=args.get("workspace_id"),
         )
-        team(
-            "codex_worker_dispatched",
-            team="engineer",
-            mode=args.get("mode", "workspace_write"),
-            sandbox=args.get("sandbox", "workspace-write"),
-            workspace_id=args.get("workspace_id"),
-            task_preview=str(args.get("task", ""))[:240],
-            task_chars=len(str(args.get("task", ""))),
-            ephemeral=bool(args.get("ephemeral", True)),
-        )
         if not settings.enable_codex_exec:
             return text_result("codex_exec is disabled by configuration.", is_error=True)
-        request = CodexExecRequest(
-            task=str(args["task"]),
-            mode=args.get("mode", "workspace_write"),
-            sandbox=args.get("sandbox", "workspace-write"),
-            workspace_id=args.get("workspace_id"),
-            output_schema_path=args.get("output_schema_path"),
-            ephemeral=bool(args.get("ephemeral", True)),
-        )
-        transcript_workspace_id = request.workspace_id
-        output_path = settings.logs_dir / "codex-last-message.md"
-        command = build_codex_command(settings.codex_command, request, output_path)
         try:
+            request = CodexExecRequest(
+                task=_required_str(args, "task"),
+                mode=cast(
+                    CodexPermissionMode,
+                    _enum_arg(
+                        args,
+                        "mode",
+                        "workspace_write",
+                        {"read_only", "workspace_write", "full_auto"},
+                    ),
+                ),
+                sandbox=cast(
+                    CodexSandboxMode,
+                    _enum_arg(
+                        args,
+                        "sandbox",
+                        "workspace-write",
+                        {"read-only", "workspace-write", "danger-full-access"},
+                    ),
+                ),
+                workspace_id=_optional_str(args, "workspace_id"),
+                output_schema_path=_optional_str(args, "output_schema_path"),
+                ephemeral=bool(args.get("ephemeral", True)),
+            )
+            team(
+                "codex_worker_dispatched",
+                team="engineer",
+                mode=request.mode,
+                sandbox=request.sandbox,
+                workspace_id=request.workspace_id,
+                task_preview=request.task[:240],
+                task_chars=len(request.task),
+                ephemeral=request.ephemeral,
+            )
+            transcript_workspace_id = request.workspace_id
+            output_path = settings.logs_dir / "codex-last-message.md"
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            command = build_codex_command(settings.codex_command, request, output_path)
             proc = await asyncio.to_thread(
                 subprocess.run,
                 command,
@@ -468,8 +525,16 @@ def build_ale_mcp_server(
                 "stderr_tail": stderr[-12000:],
             }
             return text_result(json.dumps(response, ensure_ascii=False, indent=2), is_error=proc.returncode != 0)
-        except Exception as exc:
+        except subprocess.TimeoutExpired as exc:
             log("codex_exec_failed", error_type=type(exc).__name__, error=str(exc))
+            team("codex_worker_failed", team="engineer", error_type=type(exc).__name__, error=str(exc))
+            return text_result(
+                f"codex_exec timed out after {settings.codex_timeout_seconds} seconds.",
+                is_error=True,
+            )
+        except (OSError, ValueError) as exc:
+            log("codex_exec_failed", error_type=type(exc).__name__, error=str(exc))
+            team("codex_worker_failed", team="engineer", error_type=type(exc).__name__, error=str(exc))
             return text_result(f"codex_exec failed: {exc}", is_error=True)
 
     @tool(

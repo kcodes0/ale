@@ -34,6 +34,7 @@ class Settings:
     max_budget_usd: float | None = 2.0
     discord_reply_limit: int = 1900
     discord_message_content_intent: bool = False
+    discord_sync_commands: str = "auto"
     discord_artifact_threshold: int = 2400
     artifact_publish_command: str | None = None
     artifact_publish_timeout_seconds: int = 120
@@ -62,6 +63,8 @@ class Settings:
     reload_watch_paths: tuple[str, ...] = ("ale",)
     reload_health_check_timeout_seconds: int = 60
     candidate_python_executable: str | None = None
+    log_max_bytes: int = 10_000_000
+    log_backup_count: int = 5
 
     @property
     def threads_dir(self) -> Path:
@@ -169,6 +172,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
             "ALE_DISCORD_MESSAGE_CONTENT_INTENT", "false"
         ).lower()
         in {"1", "true", "yes"},
+        discord_sync_commands=os.getenv("ALE_DISCORD_SYNC_COMMANDS", "auto").lower(),
         discord_artifact_threshold=int(os.getenv("ALE_DISCORD_ARTIFACT_THRESHOLD", "2400")),
         artifact_publish_command=os.getenv("ALE_ARTIFACT_PUBLISH_COMMAND") or None,
         artifact_publish_timeout_seconds=int(os.getenv("ALE_ARTIFACT_PUBLISH_TIMEOUT_SECONDS", "120")),
@@ -206,4 +210,6 @@ def load_settings(env_file: Path | None = None) -> Settings:
             os.getenv("ALE_RELOAD_HEALTH_CHECK_TIMEOUT_SECONDS", "60")
         ),
         candidate_python_executable=os.getenv("ALE_CANDIDATE_PYTHON") or None,
+        log_max_bytes=int(os.getenv("ALE_LOG_MAX_BYTES", "10000000")),
+        log_backup_count=int(os.getenv("ALE_LOG_BACKUP_COUNT", "5")),
     )

@@ -17,7 +17,11 @@ class AleRuntime:
         self.settings = settings
         settings.state_dir.mkdir(parents=True, exist_ok=True)
         settings.logs_dir.mkdir(parents=True, exist_ok=True)
-        self.logger = EventLogger(settings.logs_dir)
+        self.logger = EventLogger(
+            settings.logs_dir,
+            max_bytes=settings.log_max_bytes,
+            backup_count=settings.log_backup_count,
+        )
         configure_python_logging(self.logger)
         self.logger.event(
             "core",
@@ -29,6 +33,8 @@ class AleRuntime:
             hot_reload_tools=settings.hot_reload_tools,
             hot_reload_candidate=settings.hot_reload_candidate,
             enable_reload_tools=settings.enable_reload_tools,
+            log_max_bytes=settings.log_max_bytes,
+            log_backup_count=settings.log_backup_count,
         )
         self.reload_manager = ReloadManager(settings, logger=self.logger)
         self.threads = ThreadStore(
