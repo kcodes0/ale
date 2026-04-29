@@ -14,6 +14,7 @@ from ale.artifacts import publish_artifact, should_send_as_artifact, write_markd
 from ale.config import Settings, load_settings
 from ale.models import ChatMessage, RouteDecision
 from ale.reload import FileWatchdog
+from ale.reports import render_report_pdf
 from ale.service import AleRuntime
 
 LOG = logging.getLogger(__name__)
@@ -246,46 +247,14 @@ class AleDiscordClient(discord.Client):
                 if should_send_as_artifact(
                     response.text, route.persona, self.settings.discord_artifact_threshold
                 ):
-                    artifact_path = write_markdown_artifact(
-                        artifacts_dir=self.settings.artifacts_dir,
-                        thread_id=state.meta.thread_id,
-                        discord_message_id=str(message.id),
-                        title=state.meta.title,
-                        content=response.text,
+                    await self._send_long_specialist_response(
+                        message=message,
+                        response_text=response.text,
+                        route=route,
+                        state=state,
+                        original_request=content,
+                        parent_turn_id=response.turn_id,
                     )
-                    publish_result = await publish_artifact(
-                        command_template=self.settings.artifact_publish_command,
-                        artifact_path=artifact_path,
-                        timeout_seconds=self.settings.artifact_publish_timeout_seconds,
-                    )
-                    if publish_result and publish_result.url:
-                        await message.channel.send(
-                            f"{route.persona.title()} finished. Full artifact: {publish_result.url}"
-                        )
-                        self.runtime.logger.event(
-                            "discord",
-                            "artifact_link_sent",
-                            thread_id=state.meta.thread_id,
-                            path=str(artifact_path),
-                            url=publish_result.url,
-                            publish_exit_code=publish_result.exit_code,
-                            response_chars=len(response.text),
-                        )
-                    else:
-                        summary = (
-                            f"{route.persona.title()} finished. I attached the full Markdown artifact "
-                            f"and kept the Discord thread readable."
-                        )
-                        await message.channel.send(summary, file=discord.File(artifact_path))
-                        self.runtime.logger.event(
-                            "discord",
-                            "artifact_sent",
-                            thread_id=state.meta.thread_id,
-                            path=str(artifact_path),
-                            publish_attempted=bool(publish_result),
-                            publish_exit_code=publish_result.exit_code if publish_result else None,
-                            response_chars=len(response.text),
-                        )
                 else:
                     for chunk in split_for_discord(response.text, self.settings.discord_reply_limit):
                         await message.channel.send(chunk)
@@ -306,6 +275,108 @@ class AleDiscordClient(discord.Client):
 
         asyncio.create_task(self.runtime.refresh_if_needed(route.thread_id))
         self.runtime.logger.event("discord", "recap_refresh_scheduled", thread_id=route.thread_id)
+
+    async def _send_long_specialist_response(
+        self,
+        *,
+        message: discord.Message,
+        response_text: str,
+        route: RouteDecision,
+        state,
+        original_request: str,
+        parent_turn_id: str | None,
+    ) -> None:
+        """Long Engineer/Linguist replies → PDF + Actor summary in Discord.
+
+        The full text always lands as a markdown artifact (auditable, diffable)
+        and as a PDF (user-friendly). The Discord-visible message is a short
+        Actor-voiced summary so the user gets a human read instead of a wall
+        of technical text.
+        """
+
+        artifact_path = write_markdown_artifact(
+            artifacts_dir=self.settings.artifacts_dir,
+            thread_id=state.meta.thread_id,
+            discord_message_id=str(message.id),
+            title=state.meta.title,
+            content=response_text,
+        )
+
+        pdf_path = None
+        if self.settings.enable_pdf_artifacts:
+            try:
+                pdf_path = artifact_path.with_suffix(".pdf")
+                render_result = render_report_pdf(
+                    title=f"{route.persona.title()} report — {state.meta.title}",
+                    body=response_text,
+                    output_path=pdf_path,
+                    metadata={
+                        "thread_id": state.meta.thread_id,
+                        "discord_message_id": str(message.id),
+                        "persona": route.persona,
+                    },
+                )
+                self.runtime.logger.event(
+                    "discord",
+                    "pdf_rendered",
+                    thread_id=state.meta.thread_id,
+                    persona=route.persona,
+                    pdf_path=str(pdf_path),
+                    page_count=render_result.page_count,
+                    bytes_written=render_result.bytes_written,
+                )
+            except Exception as exc:
+                self.runtime.logger.exception(
+                    "discord",
+                    "pdf_render_failed",
+                    exc,
+                    thread_id=state.meta.thread_id,
+                    persona=route.persona,
+                )
+                pdf_path = None
+
+        summary = await self.runtime.agent.summarize_for_discord(
+            source_persona=route.persona,
+            full_text=response_text,
+            thread_id=state.meta.thread_id,
+            original_request=original_request,
+            parent_turn_id=parent_turn_id,
+        )
+
+        publish_result = await publish_artifact(
+            command_template=self.settings.artifact_publish_command,
+            artifact_path=artifact_path,
+            timeout_seconds=self.settings.artifact_publish_timeout_seconds,
+        )
+
+        attachments: list[discord.File] = []
+        if pdf_path and pdf_path.exists():
+            attachments.append(discord.File(pdf_path))
+        elif not (publish_result and publish_result.url):
+            attachments.append(discord.File(artifact_path))
+
+        body = summary.strip()
+        if publish_result and publish_result.url:
+            body = f"{body}\n\nFull report: {publish_result.url}"
+        elif pdf_path and pdf_path.exists():
+            body = f"{body}\n\nFull report attached as `{pdf_path.name}`."
+        else:
+            body = f"{body}\n\nFull report attached as `{artifact_path.name}`."
+        body = body[: self.settings.discord_reply_limit]
+
+        await message.channel.send(body, files=attachments or None)
+        self.runtime.logger.event(
+            "discord",
+            "specialist_summary_sent",
+            thread_id=state.meta.thread_id,
+            persona=route.persona,
+            md_path=str(artifact_path),
+            pdf_path=str(pdf_path) if pdf_path else None,
+            publish_url=publish_result.url if publish_result else None,
+            publish_exit_code=publish_result.exit_code if publish_result else None,
+            response_chars=len(response_text),
+            summary_chars=len(summary),
+        )
 
     async def _handoff_error_to_engineer(
         self,

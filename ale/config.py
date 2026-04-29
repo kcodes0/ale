@@ -37,6 +37,10 @@ class Settings:
     discord_artifact_threshold: int = 2400
     artifact_publish_command: str | None = None
     artifact_publish_timeout_seconds: int = 120
+    enable_pdf_artifacts: bool = True
+    enable_actor_summary: bool = True
+    actor_summary_max_chars: int = 1400
+    actor_summary_max_budget_usd: float = 0.05
     specialist_progress_min_seconds: float = 15.0
     enable_bash_tool: bool = False
     enable_codex_exec: bool = False
@@ -163,6 +167,12 @@ def load_settings(env_file: Path | None = None) -> Settings:
         discord_artifact_threshold=int(os.getenv("ALE_DISCORD_ARTIFACT_THRESHOLD", "2400")),
         artifact_publish_command=os.getenv("ALE_ARTIFACT_PUBLISH_COMMAND") or None,
         artifact_publish_timeout_seconds=int(os.getenv("ALE_ARTIFACT_PUBLISH_TIMEOUT_SECONDS", "120")),
+        enable_pdf_artifacts=os.getenv("ALE_ENABLE_PDF_ARTIFACTS", "true").lower()
+        in {"1", "true", "yes"},
+        enable_actor_summary=os.getenv("ALE_ENABLE_ACTOR_SUMMARY", "true").lower()
+        in {"1", "true", "yes"},
+        actor_summary_max_chars=int(os.getenv("ALE_ACTOR_SUMMARY_MAX_CHARS", "1400")),
+        actor_summary_max_budget_usd=float(os.getenv("ALE_ACTOR_SUMMARY_MAX_BUDGET_USD", "0.05")),
         specialist_progress_min_seconds=float(os.getenv("ALE_SPECIALIST_PROGRESS_MIN_SECONDS", "15")),
         enable_bash_tool=os.getenv("ALE_ENABLE_BASH_TOOL", "false").lower() in {"1", "true", "yes"},
         enable_codex_exec=os.getenv("ALE_ENABLE_CODEX_EXEC", "false").lower()

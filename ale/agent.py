@@ -278,6 +278,126 @@ class AleAgent:
         finally:
             self.reload_manager.turn_ended()
 
+    async def summarize_for_discord(
+        self,
+        *,
+        source_persona: str,
+        full_text: str,
+        thread_id: str,
+        original_request: str,
+        parent_turn_id: str | None = None,
+    ) -> str:
+        """Run a tight Actor turn that condenses a specialist report for Discord.
+
+        Engineer/Linguist long-form output goes into the PDF artifact. The
+        Discord-visible message is a short Actor-voiced summary so the user
+        gets a quick, human read instead of a wall of technical text. No
+        tools, one turn, low budget.
+        """
+
+        if query is None or ClaudeAgentOptions is None:
+            return _fallback_summary(full_text)
+        snapshot = self.reload_manager.snapshot
+        settings = snapshot.settings
+        if not settings.enable_actor_summary:
+            return _fallback_summary(full_text, max_chars=settings.actor_summary_max_chars)
+        if settings.anthropic_api_key:
+            os.environ["ANTHROPIC_API_KEY"] = settings.anthropic_api_key
+
+        turn_id = uuid.uuid4().hex[:12]
+        started_at = time.monotonic()
+        max_chars = settings.actor_summary_max_chars
+        prompt = f"""\
+You are Actor summarizing a long {source_persona.title()} report for the user in Discord.
+
+Rules:
+- Stay in Actor's voice: warm, sharp, plain language, no jargon dumps.
+- Lead with the punchline: did it work, what's the headline result.
+- Then 2 to 5 short bullets of the most useful concrete details (ids, counts, durations, paths only if they matter).
+- If something failed or needs the user's attention, call it out clearly.
+- Mention that the full report is attached as a PDF.
+- Hard limit: {max_chars} characters total. Stay well under it if possible.
+- No headings, no chain-of-thought, no preamble like "here is a summary".
+- Do not invent details. If the report is incomplete, say so.
+
+Original user request:
+{original_request[:1500]}
+
+Full {source_persona.title()} report:
+{full_text}
+"""
+
+        self.logger.team(
+            "summary_started",
+            turn_id=turn_id,
+            parent_turn_id=parent_turn_id,
+            thread_id=thread_id,
+            team="actor",
+            source_persona=source_persona,
+            full_chars=len(full_text),
+            target_chars=max_chars,
+        )
+
+        text_chunks: list[str] = []
+        result: Any | None = None
+        self.reload_manager.turn_started()
+        try:
+            try:
+                async for message in query(
+                    prompt=prompt,
+                    options=ClaudeAgentOptions(
+                        tools=[],
+                        allowed_tools=[],
+                        permission_mode="dontAsk",
+                        model=settings.actor_model,
+                        max_turns=1,
+                        max_budget_usd=settings.actor_summary_max_budget_usd,
+                        setting_sources=[],
+                        system_prompt=snapshot.base_system_prompt,
+                    ),
+                ):
+                    if AssistantMessage is not None and isinstance(message, AssistantMessage):
+                        for block in message.content:
+                            if TextBlock is not None and isinstance(block, TextBlock):
+                                text_chunks.append(block.text)
+                    if ResultMessage is not None and isinstance(message, ResultMessage):
+                        result = message
+            except Exception as exc:
+                duration_ms = int((time.monotonic() - started_at) * 1000)
+                self.logger.exception(
+                    "agent",
+                    "summary_failed",
+                    exc,
+                    turn_id=turn_id,
+                    parent_turn_id=parent_turn_id,
+                    thread_id=thread_id,
+                    source_persona=source_persona,
+                    duration_ms=duration_ms,
+                )
+                return _fallback_summary(full_text, max_chars=max_chars)
+
+            summary = (getattr(result, "result", None) or "\n".join(text_chunks)).strip()
+            if not summary:
+                summary = _fallback_summary(full_text, max_chars=max_chars)
+            elif len(summary) > max_chars:
+                summary = summary[: max_chars - 1].rstrip() + "…"
+            duration_ms = int((time.monotonic() - started_at) * 1000)
+            self.logger.team(
+                "summary_completed",
+                turn_id=turn_id,
+                parent_turn_id=parent_turn_id,
+                thread_id=thread_id,
+                team="actor",
+                source_persona=source_persona,
+                summary_chars=len(summary),
+                full_chars=len(full_text),
+                duration_ms=duration_ms,
+                cost_usd_estimate=getattr(result, "total_cost_usd", None),
+            )
+            return summary
+        finally:
+            self.reload_manager.turn_ended()
+
     def _build_options(self, persona: str, *, snapshot: Any) -> Any:
         from ale.tools import build_ale_mcp_server
 
@@ -448,6 +568,23 @@ def specialist_progress_message(persona: str, tool_name: str, tool_count: int) -
     if tool_count == 4:
         return "Engineer is narrowing this into an actionable fix."
     return f"Engineer is still working; latest step used `{tool_name}`."
+
+
+def _fallback_summary(full_text: str, *, max_chars: int = 1400) -> str:
+    """Deterministic local fallback used if the Actor SDK call fails or is off.
+
+    Keeps the user from staring at silence when the summarizer turn errors —
+    we just truncate to the first paragraph or two and tag it as un-summarized.
+    """
+
+    text = full_text.strip()
+    if not text:
+        return "Specialist returned no text. The PDF is empty too — please retry."
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    head = "\n\n".join(paragraphs[:2]) if paragraphs else text[:max_chars]
+    if len(head) > max_chars - 80:
+        head = head[: max_chars - 80].rstrip() + "…"
+    return head + "\n\n(Full report attached as PDF — Actor summary unavailable.)"
 
 
 def _summarize_tool_args(args: Any, *, max_len: int = 200) -> str:

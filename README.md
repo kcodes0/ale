@@ -37,9 +37,23 @@ For DM-only testing, Ale leaves Discord's privileged Message Content intent off 
 default. Set `ALE_DISCORD_MESSAGE_CONTENT_INTENT=true` only after enabling that
 privileged intent in the Discord Developer Portal.
 
-Long Linguist and Engineer replies are sent as Markdown attachments once they exceed
-`ALE_DISCORD_ARTIFACT_THRESHOLD` characters. The same files are saved under
-`~/.local/state/ale/artifacts`.
+Long Linguist and Engineer replies cross over `ALE_DISCORD_ARTIFACT_THRESHOLD`
+(default 2400 chars). When that happens:
+
+- The full report is saved as `<message_id>.md` and rendered to `<message_id>.pdf`
+  under `~/.local/state/ale/artifacts/<thread>/`.
+- A short Actor-voiced summary is generated (one fast SDK call, no tools, capped
+  at `ALE_ACTOR_SUMMARY_MAX_CHARS`, default 1400) and posted as the visible
+  Discord message.
+- The PDF is attached. If `ALE_ARTIFACT_PUBLISH_COMMAND` returns a URL, the
+  link is included in the message instead of a local attachment.
+
+Knobs:
+
+- `ALE_ENABLE_PDF_ARTIFACTS` (default `true`) — render the PDF.
+- `ALE_ENABLE_ACTOR_SUMMARY` (default `true`) — run the Actor summarizer turn.
+- `ALE_ACTOR_SUMMARY_MAX_CHARS` (default `1400`) — hard cap on the summary.
+- `ALE_ACTOR_SUMMARY_MAX_BUDGET_USD` (default `0.05`) — per-summary budget.
 
 Set `ALE_ARTIFACT_PUBLISH_COMMAND` to turn those files into links. Ale runs the command
 without a shell, replaces `{path}` with the Markdown file path if present, and sends the
