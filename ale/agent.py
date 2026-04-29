@@ -47,35 +47,6 @@ class AgentResponse:
     turn_id: str = ""
 
 
-BASE_SYSTEM = """\
-<identity>
-You are Ale, a Discord-native extensible agent for one allowed user.
-Ale is pronounced Ali or Ally like Alison.
-</identity>
-
-<context_policy>
-Use the active thread recap as default context.
-Use exact recent turns only when they matter.
-Call read_thread or search_threads when recap context is insufficient.
-Do not assume old context that is not in the provided payload or retrievable tools.
-</context_policy>
-
-<tool_policy>
-Prefer no tool call for ordinary conversation.
-Use tools for external state, exact prior details, memory reads/writes, web facts, or Discord actions.
-Ask before irreversible or externally visible actions unless the user explicitly requested them.
-When a request needs sustained research or longform synthesis, visibly delegate to Linguist.
-When a request needs code changes, debugging, deployment, or Ale self-improvement, visibly delegate to Engineer.
-</tool_policy>
-
-<response_contract>
-For ordinary chat, answer naturally in Discord-ready text.
-Do not expose chain-of-thought, internal routing, or hidden deliberation.
-If no response is useful, return exactly: NO_REPLY
-</response_contract>
-"""
-
-
 class AleAgent:
     def __init__(
         self,
@@ -169,128 +140,143 @@ class AleAgent:
         text_chunks: list[str] = []
         result: Any | None = None
 
+        self.reload_manager.turn_started()
         try:
-            async for message in query(prompt=prompt, options=options):
-                if AssistantMessage is not None and isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        if TextBlock is not None and isinstance(block, TextBlock):
-                            text_chunks.append(block.text)
-                        elif ToolUseBlock is not None and isinstance(block, ToolUseBlock):
-                            tool_calls.append(block.name)
-                            tool_started_at[f"{block.name}#{len(tool_calls)}"] = time.monotonic()
-                            args_summary = _summarize_tool_args(getattr(block, "input", None))
-                            if progress_callback and persona.name in {"linguist", "engineer"}:
-                                await progress_callback(
-                                    specialist_progress_message(
-                                        persona.name, block.name, len(tool_calls)
+            try:
+                async for message in query(prompt=prompt, options=options):
+                    if AssistantMessage is not None and isinstance(message, AssistantMessage):
+                        for block in message.content:
+                            if TextBlock is not None and isinstance(block, TextBlock):
+                                text_chunks.append(block.text)
+                            elif ToolUseBlock is not None and isinstance(block, ToolUseBlock):
+                                tool_calls.append(block.name)
+                                tool_started_at[f"{block.name}#{len(tool_calls)}"] = time.monotonic()
+                                args_summary = _summarize_tool_args(getattr(block, "input", None))
+                                if progress_callback and persona.name in {"linguist", "engineer"}:
+                                    await progress_callback(
+                                        specialist_progress_message(
+                                            persona.name, block.name, len(tool_calls)
+                                        )
                                     )
-                                )
-                            self.logger.event(
-                                "agent",
-                                "tool_requested",
-                                turn_id=turn_id,
-                                thread_id=state.meta.thread_id,
-                                persona=persona.name,
-                                agent_role=agent_role,
-                                team=team_label,
-                                tool_index=len(tool_calls),
-                                tool_name=block.name,
-                                tool_args_summary=args_summary,
-                            )
-                            if persona.name in {"linguist", "engineer"}:
-                                self.logger.team(
+                                self.logger.event(
+                                    "agent",
                                     "tool_requested",
                                     turn_id=turn_id,
                                     thread_id=state.meta.thread_id,
+                                    persona=persona.name,
+                                    agent_role=agent_role,
                                     team=team_label,
-                                    tool_name=block.name,
                                     tool_index=len(tool_calls),
+                                    tool_name=block.name,
                                     tool_args_summary=args_summary,
                                 )
-                if ResultMessage is not None and isinstance(message, ResultMessage):
-                    result = message
-        except Exception as exc:
+                                if persona.name in {"linguist", "engineer"}:
+                                    self.logger.team(
+                                        "tool_requested",
+                                        turn_id=turn_id,
+                                        thread_id=state.meta.thread_id,
+                                        team=team_label,
+                                        tool_name=block.name,
+                                        tool_index=len(tool_calls),
+                                        tool_args_summary=args_summary,
+                                    )
+                    if ResultMessage is not None and isinstance(message, ResultMessage):
+                        result = message
+            except Exception as exc:
+                duration_ms = int((time.monotonic() - started_at) * 1000)
+                self.logger.exception(
+                    "agent",
+                    "turn_failed",
+                    exc,
+                    turn_id=turn_id,
+                    thread_id=state.meta.thread_id,
+                    persona=persona.name,
+                    agent_role=agent_role,
+                    team=team_label,
+                    duration_ms=duration_ms,
+                    tool_call_count=len(tool_calls),
+                    in_flight_turns=self.reload_manager.in_flight_turns,
+                    last_reload_id=(
+                        self.reload_manager.last_result.reload_id
+                        if self.reload_manager.last_result
+                        else None
+                    ),
+                    last_reload_tier=(
+                        self.reload_manager.last_result.tier
+                        if self.reload_manager.last_result
+                        else None
+                    ),
+                )
+                if persona.name in {"linguist", "engineer"}:
+                    self.logger.team(
+                        "turn_failed",
+                        turn_id=turn_id,
+                        thread_id=state.meta.thread_id,
+                        team=team_label,
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                        duration_ms=duration_ms,
+                    )
+                raise
+
+            response_text = (getattr(result, "result", None) or "\n".join(text_chunks)).strip()
             duration_ms = int((time.monotonic() - started_at) * 1000)
-            self.logger.exception(
+            response = AgentResponse(
+                text=response_text,
+                session_id=getattr(result, "session_id", None),
+                usage=getattr(result, "usage", None),
+                cost_usd=getattr(result, "total_cost_usd", None),
+                tool_calls=tuple(tool_calls),
+                turn_id=turn_id,
+            )
+            self.logger.turn(
+                turn_id=turn_id,
+                parent_turn_id=parent_turn_id,
+                thread_id=state.meta.thread_id,
+                discord_message_id=user_message.discord_message_id,
+                persona=persona.name,
+                agent_role=agent_role,
+                team=team_label,
+                model=self._model_for(persona.name),
+                session_id=response.session_id,
+                tool_calls=list(response.tool_calls),
+                tool_call_count=len(response.tool_calls),
+                usage=response.usage,
+                cost_usd_estimate=response.cost_usd,
+                route_confidence=route.confidence,
+                route_reason=route.reason,
+                response_chars=len(response.text),
+                duration_ms=duration_ms,
+            )
+            self.logger.event(
                 "agent",
-                "turn_failed",
-                exc,
+                "turn_completed",
                 turn_id=turn_id,
                 thread_id=state.meta.thread_id,
                 persona=persona.name,
                 agent_role=agent_role,
                 team=team_label,
-                duration_ms=duration_ms,
-                tool_call_count=len(tool_calls),
-            )
-            if persona.name in {"linguist", "engineer"}:
-                self.logger.team(
-                    "turn_failed",
-                    turn_id=turn_id,
-                    thread_id=state.meta.thread_id,
-                    team=team_label,
-                    error_type=type(exc).__name__,
-                    error=str(exc),
-                    duration_ms=duration_ms,
-                )
-            raise
-
-        response_text = (getattr(result, "result", None) or "\n".join(text_chunks)).strip()
-        duration_ms = int((time.monotonic() - started_at) * 1000)
-        response = AgentResponse(
-            text=response_text,
-            session_id=getattr(result, "session_id", None),
-            usage=getattr(result, "usage", None),
-            cost_usd=getattr(result, "total_cost_usd", None),
-            tool_calls=tuple(tool_calls),
-            turn_id=turn_id,
-        )
-        self.logger.turn(
-            turn_id=turn_id,
-            parent_turn_id=parent_turn_id,
-            thread_id=state.meta.thread_id,
-            discord_message_id=user_message.discord_message_id,
-            persona=persona.name,
-            agent_role=agent_role,
-            team=team_label,
-            model=self._model_for(persona.name),
-            session_id=response.session_id,
-            tool_calls=list(response.tool_calls),
-            tool_call_count=len(response.tool_calls),
-            usage=response.usage,
-            cost_usd_estimate=response.cost_usd,
-            route_confidence=route.confidence,
-            route_reason=route.reason,
-            response_chars=len(response.text),
-            duration_ms=duration_ms,
-        )
-        self.logger.event(
-            "agent",
-            "turn_completed",
-            turn_id=turn_id,
-            thread_id=state.meta.thread_id,
-            persona=persona.name,
-            agent_role=agent_role,
-            team=team_label,
-            tool_call_count=len(tool_calls),
-            response_chars=len(response.text),
-            duration_ms=duration_ms,
-            cost_usd_estimate=response.cost_usd,
-        )
-        if persona.name in {"linguist", "engineer"}:
-            self.logger.team(
-                "turn_completed",
-                turn_id=turn_id,
-                thread_id=state.meta.thread_id,
-                team=team_label,
-                lead=persona.name.title(),
                 tool_call_count=len(tool_calls),
                 response_chars=len(response.text),
                 duration_ms=duration_ms,
                 cost_usd_estimate=response.cost_usd,
-                tool_sequence=list(response.tool_calls),
             )
-        return response
+            if persona.name in {"linguist", "engineer"}:
+                self.logger.team(
+                    "turn_completed",
+                    turn_id=turn_id,
+                    thread_id=state.meta.thread_id,
+                    team=team_label,
+                    lead=persona.name.title(),
+                    tool_call_count=len(tool_calls),
+                    response_chars=len(response.text),
+                    duration_ms=duration_ms,
+                    cost_usd_estimate=response.cost_usd,
+                    tool_sequence=list(response.tool_calls),
+                )
+            return response
+        finally:
+            self.reload_manager.turn_ended()
 
     def _build_options(self, persona: str, *, snapshot: Any) -> Any:
         from ale.tools import build_ale_mcp_server

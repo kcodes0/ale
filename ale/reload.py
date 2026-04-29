@@ -110,6 +110,9 @@ class ReloadManager:
         self.logger = logger
         self._settings = settings
         self._listeners: list[Callable[[ReloadResult], Awaitable[None] | None]] = []
+        self._in_flight_turns = 0
+        self._turn_idle = asyncio.Event()
+        self._turn_idle.set()
         self._snapshot = self._capture_snapshot(settings)
         self._previous_snapshot: ReloadSnapshot | None = None
         self._history: list[ReloadResult] = []
@@ -136,6 +139,37 @@ class ReloadManager:
 
     def add_listener(self, listener: Callable[[ReloadResult], Awaitable[None] | None]) -> None:
         self._listeners.append(listener)
+
+    def turn_started(self) -> None:
+        """Mark an agent turn as in flight so reloads defer until it ends.
+
+        Reloading ``ale.tools`` or ``ale.personas`` while ``AleAgent.respond``
+        is mid-iteration corrupts the closures and module globals the running
+        coroutine depends on, and the bundled Claude CLI subprocess exits 1 a
+        few tools later. Holding turns in a counter and gating reloads behind
+        ``await_turns_idle`` removes the race.
+        """
+
+        self._in_flight_turns += 1
+        if self._in_flight_turns == 1:
+            self._turn_idle.clear()
+
+    def turn_ended(self) -> None:
+        if self._in_flight_turns > 0:
+            self._in_flight_turns -= 1
+        if self._in_flight_turns == 0:
+            self._turn_idle.set()
+
+    @property
+    def in_flight_turns(self) -> int:
+        return self._in_flight_turns
+
+    async def await_turns_idle(self, timeout: float | None = None) -> bool:
+        try:
+            await asyncio.wait_for(self._turn_idle.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
 
     def changed_files(self) -> list[str]:
         current = _scan_files(self._watch_roots())
@@ -199,6 +233,13 @@ class ReloadManager:
                     error_type="ConfigDisabled",
                 )
             )
+        # Tier 2 re-imports ale.tools. The MCP server built by the running turn
+        # holds closures into the old module dict, and the SDK's tool registry
+        # keys collide on a duplicate registration. Wait for turns to drain so
+        # the next agent call gets a clean rebuild.
+        await self.await_turns_idle(
+            timeout=self._snapshot.settings.reload_health_check_timeout_seconds
+        )
         return await self._reload(tier="tools", reason=reason, runner=self._do_reload_tools)
 
     async def health_check_candidate(self, *, reason: str = "manual") -> ReloadResult:
@@ -410,16 +451,19 @@ class ReloadManager:
         }
 
     def _capture_snapshot(self, settings: Settings) -> ReloadSnapshot:
-        import ale.agent as agent_module
+        # Reload only modules that aren't owning a currently-running coroutine.
+        # ``ale.agent`` is *not* reloaded — its respond() holds module globals
+        # whose mid-flight rebinding crashes the bundled Claude CLI subprocess.
         import ale.personas as personas_module
+        import ale.prompts as prompts_module
         import ale.tools as tools_module
 
+        importlib.reload(prompts_module)
         importlib.reload(personas_module)
-        importlib.reload(agent_module)
 
         return ReloadSnapshot(
             settings=settings,
-            base_system_prompt=getattr(agent_module, "BASE_SYSTEM"),
+            base_system_prompt=prompts_module.BASE_SYSTEM,
             persona_prompts={
                 name: persona.system_prompt
                 for name, persona in personas_module.PERSONAS.items()
@@ -550,6 +594,7 @@ class FileWatchdog:
 
     async def _fire(self, changed: list[str]) -> None:
         settings = self.manager.settings
+        in_flight = self.manager.in_flight_turns
         self.logger.event(
             "reload",
             "watchdog_fire",
@@ -557,7 +602,18 @@ class FileWatchdog:
             sample=changed[:5],
             will_reload_tools=settings.hot_reload_tools,
             will_health_check_candidate=settings.hot_reload_candidate,
+            in_flight_turns=in_flight,
         )
+        if in_flight:
+            self.logger.event(
+                "reload",
+                "watchdog_awaiting_idle",
+                in_flight_turns=in_flight,
+                timeout_seconds=settings.reload_health_check_timeout_seconds,
+            )
+            await self.manager.await_turns_idle(
+                timeout=settings.reload_health_check_timeout_seconds
+            )
         config_result = await self.manager.reload_config_and_prompts(reason="watchdog")
         if not config_result.ok:
             return

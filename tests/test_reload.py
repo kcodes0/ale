@@ -150,6 +150,33 @@ async def test_watchdog_fires_reload_on_change(tmp_path, monkeypatch):
     assert any(r.tier == "config" and r.ok for r in manager.history)
 
 
+async def test_reload_tools_waits_for_turns_to_drain(tmp_path, isolated_settings):
+    manager = _make_manager(isolated_settings, tmp_path)
+    manager.turn_started()
+
+    reload_task = asyncio.create_task(manager.reload_tools(reason="while-busy"))
+    # Give the reload a moment to enter the await-idle gate.
+    await asyncio.sleep(0.1)
+    assert not reload_task.done()
+    manager.turn_ended()
+
+    result = await asyncio.wait_for(reload_task, timeout=5)
+    assert result.ok
+
+
+async def test_capture_snapshot_does_not_reload_agent_module(tmp_path, isolated_settings):
+    import ale.agent as agent_module
+
+    manager = _make_manager(isolated_settings, tmp_path)
+    agent_id_before = id(agent_module)
+
+    await manager.reload_config_and_prompts(reason="test")
+
+    # AleAgent's own module must not be reloaded — that would clobber the
+    # globals respond() reads via LOAD_GLOBAL while it is mid-coroutine.
+    assert id(agent_module) == agent_id_before
+
+
 def test_health_check_cli_returns_zero(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("ALE_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("ALE_MEMORY_DIR", str(tmp_path / "memory"))
