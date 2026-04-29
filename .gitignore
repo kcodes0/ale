@@ -8,3 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local secrets and runtime state
+.env
+.env.local

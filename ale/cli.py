@@ -10,6 +10,7 @@ import sys
 from ale.config import load_settings
 from ale.discord_app import run as run_discord
 from ale.models import ChatMessage
+from ale.onboard import run_onboarding
 from ale.service import AleRuntime
 
 
@@ -108,6 +109,11 @@ def main() -> None:
         help="Boot the harness and exit. Used by Tier 3 candidate health checks.",
     )
 
+    sub.add_parser(
+        "onboard",
+        help="Interactive first-run setup: bot token, allowed user IDs, git remote.",
+    )
+
     args = parser.parse_args()
     if args.command == "discord":
         run_discord()
@@ -115,6 +121,8 @@ def main() -> None:
         asyncio.run(ask_once(args.prompt, thread_id=args.thread_id))
     elif args.command == "health-check":
         sys.exit(health_check())
+    elif args.command == "onboard":
+        sys.exit(run_onboarding())
 
 
 if __name__ == "__main__":
