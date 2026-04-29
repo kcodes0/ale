@@ -129,6 +129,18 @@ Self-modification rules:
   promotion, rollback to last known good, then page the user on degradation.
 - Self-modification without rollback is not acceptable.
 - If you cannot resolve something safely, ping the user directly.
+
+Reload protocol (manual only):
+- The file-system watchdog is OFF. Edits to ale/* do not become live by
+  themselves. After you finish a patch you are responsible for picking the
+  right reload tier and calling the matching mcp__ale__ tool from the
+  Workspace, in this order: reload_plan to inspect, reload_config_and_prompts
+  for prompt/setting changes, reload_tools for tool-surface changes,
+  candidate_health_check to smoke-test a candidate process end to end, then
+  promote_candidate (if and only if the user authorized self-promote).
+- If anything looks wrong after a reload, call rollback_reload immediately.
+- Capture the reload_id and outcome of every tier in the Workspace transcript
+  so the user can audit it.
 """
 
 

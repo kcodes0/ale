@@ -139,42 +139,48 @@ Supported modes:
 
 ## Hot Reload
 
-`uv run ale discord` watches `ale/*.py` and reloads itself when Engineer (or
-you) edits the harness, in three staged tiers:
+Reload is **manual**: the Lead Engineer drives staged reloads from inside a
+Workspace by calling the `reload_*` MCP tools. The file-system watchdog is
+**off by default** — flip `ALE_HOT_RELOAD_ENABLED=true` only when you want
+auto-reload during local development.
 
-1. **Config + prompts** (always on). Re-reads `.env` into a fresh `Settings`
-   and re-imports `ale.personas` / `ale.agent` so the BASE_SYSTEM and persona
-   prompts visible to the next SDK call reflect disk. In-flight turns keep their
-   snapshot.
-2. **Tool module** (default on, `ALE_HOT_RELOAD_TOOLS=true`). Re-imports
-   `ale.tools` so MCP tool definitions on the next agent call are fresh.
-3. **Candidate process + health check** (opt-in, `ALE_HOT_RELOAD_CANDIDATE=true`).
-   Spawns `ale health-check` as a subprocess to smoke-test the new code path
-   end to end. Promote with the `promote_candidate` MCP tool when
-   `ALE_ENABLE_SELF_PROMOTE=true` — that re-execs the current process so
-   Discord reconnects on the new code. `rollback_reload` restores the previous
-   Settings/prompt/tool snapshot if a regression slips through.
+Three staged tiers:
+
+1. **Config + prompts** (`reload_config_and_prompts`). Re-reads `.env` into a
+   fresh `Settings` and re-imports `ale.personas` / `ale.prompts` so the
+   BASE_SYSTEM and persona prompts visible to the next SDK call reflect disk.
+   In-flight turns keep their snapshot.
+2. **Tool module** (`reload_tools`). Re-imports `ale.tools` so MCP tool
+   definitions on the next agent call are fresh. Waits for in-flight turns to
+   drain before swapping (the bundled Claude CLI subprocess crashes if its
+   tool registry changes mid-iteration).
+3. **Candidate process + health check** (`candidate_health_check`). Spawns
+   `ale health-check` as a subprocess to smoke-test the new code path end to
+   end. `promote_candidate` re-execs the current process when
+   `ALE_ENABLE_SELF_PROMOTE=true`. `rollback_reload` restores the previous
+   snapshot if a regression slips through.
 
 Triggers:
 
-- File watchdog (default, polling every `ALE_RELOAD_POLL_INTERVAL_SECONDS=1.0`,
-  debounced for `ALE_RELOAD_DEBOUNCE_SECONDS=1.5`).
-- `SIGHUP` to the Discord process.
-- Engineer MCP tools: `reload_plan` (read-only inspection), `reload_config_and_prompts`,
-  `reload_tools`, `candidate_health_check`, `promote_candidate`, `rollback_reload`.
+- Engineer MCP tools (primary): `reload_plan` (read-only inspection),
+  `reload_config_and_prompts`, `reload_tools`, `candidate_health_check`,
+  `promote_candidate`, `rollback_reload`.
+- `SIGHUP` to the Discord process — runs Tier 1, then Tier 2 if
+  `ALE_HOT_RELOAD_TOOLS=true`, then Tier 3 if `ALE_HOT_RELOAD_CANDIDATE=true`.
+- File watchdog (off by default; turn on with `ALE_HOT_RELOAD_ENABLED=true`).
 
-Engineer is allowed to *draft* and *inspect* hot-reload work. Live re-exec
-(`promote_candidate`) is gated behind `ALE_ENABLE_SELF_PROMOTE=true` so the
-harness will not self-promote until you opt in.
+The watchdog respects an in-flight turn counter and emits
+`watchdog_awaiting_idle` when it has to defer a reload, so even with the
+watchdog enabled it will not crash a running turn.
 
 Relevant env vars:
 
-- `ALE_HOT_RELOAD_ENABLED` — master switch (default `true`)
-- `ALE_HOT_RELOAD_TOOLS` — Tier 2 (default `true`)
-- `ALE_HOT_RELOAD_CANDIDATE` — Tier 3 candidate health check on watchdog (default `false`)
+- `ALE_HOT_RELOAD_ENABLED` — auto file-watcher (default `false`)
+- `ALE_HOT_RELOAD_TOOLS` — let `reload_tools` re-import (default `true`)
+- `ALE_HOT_RELOAD_CANDIDATE` — let SIGHUP/watchdog also fire candidate health check (default `false`)
 - `ALE_ENABLE_RELOAD_TOOLS` — expose reload MCP tools to Engineer (default `true`)
 - `ALE_ENABLE_SELF_PROMOTE` — allow `promote_candidate` to re-exec (default `false`)
-- `ALE_RELOAD_WATCH_PATHS` — comma-separated roots to watch (default `ale`)
+- `ALE_RELOAD_WATCH_PATHS` — roots to watch when watchdog is on (default `ale`)
 - `ALE_RELOAD_DEBOUNCE_SECONDS` (default `1.5`)
 - `ALE_RELOAD_POLL_INTERVAL_SECONDS` (default `1.0`)
 - `ALE_RELOAD_HEALTH_CHECK_TIMEOUT_SECONDS` (default `60`)

@@ -47,7 +47,12 @@ class Settings:
     heartbeat_command: str = "claude-heartbeat"
     codex_command: str = "codex"
     codex_timeout_seconds: int = 1800
-    hot_reload_enabled: bool = True
+    # Watchdog auto-reload (file-system → staged reload) is opt-in. The Lead
+    # Engineer drives reloads manually via the reload_* MCP tools from inside
+    # a Workspace; that gives them deliberate control instead of a watcher
+    # firing mid-turn. Set ALE_HOT_RELOAD_ENABLED=true to bring the watchdog
+    # back for local development.
+    hot_reload_enabled: bool = False
     hot_reload_tools: bool = True
     hot_reload_candidate: bool = False
     enable_reload_tools: bool = True
@@ -180,7 +185,7 @@ def load_settings(env_file: Path | None = None) -> Settings:
         heartbeat_command=os.getenv("ALE_HEARTBEAT_COMMAND", "claude-heartbeat"),
         codex_command=os.getenv("ALE_CODEX_COMMAND", "codex"),
         codex_timeout_seconds=int(os.getenv("ALE_CODEX_TIMEOUT_SECONDS", "1800")),
-        hot_reload_enabled=os.getenv("ALE_HOT_RELOAD_ENABLED", "true").lower()
+        hot_reload_enabled=os.getenv("ALE_HOT_RELOAD_ENABLED", "false").lower()
         in {"1", "true", "yes"},
         hot_reload_tools=os.getenv("ALE_HOT_RELOAD_TOOLS", "true").lower() in {"1", "true", "yes"},
         hot_reload_candidate=os.getenv("ALE_HOT_RELOAD_CANDIDATE", "false").lower()
