@@ -1,0 +1,24 @@
+[Unit]
+Description=Pi Cloud Delegation Service
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/pi-cloud-delegation-service
+EnvironmentFile=/etc/pi-cloud/pi-cloud.env
+ExecStart=/usr/local/bin/bun run start
+Restart=always
+RestartSec=5
+User=pi-cloud
+Group=pi-cloud
+
+# Basic hardening. Docker access is intentionally allowed through the pi-cloud user's docker group membership.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/opt/pi-cloud-delegation-service/.pi-cloud /etc/pi-cloud
+
+[Install]
+WantedBy=multi-user.target

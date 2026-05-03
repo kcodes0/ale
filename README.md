@@ -182,3 +182,18 @@ export ALE_ALLOWED_USER_IDS="1234567890"
 Or edit `.env` in the repo root. Required keys: `DISCORD_TOKEN` (or
 `DISCORD_TOKEN_FILE`) and `ALE_ALLOWED_USER_IDS` (or an `access.json` under
 `~/.local/state/ale/`).
+
+## Pi Cloud Delegation Service
+
+This repo also contains the Bun/TypeScript Pi Cloud Delegation Service under
+[`pi-cloud-delegation-service/`](pi-cloud-delegation-service/). It exposes a
+safe MCP layer for Poke to start sandboxed pi coding jobs without exposing raw
+pi execution over iMessage.
+
+```bash
+cd pi-cloud-delegation-service
+bun install
+bun run typecheck
+```
+
+For server setup, see `pi-cloud-delegation-service/README.md`.
