@@ -1,14 +1,35 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
+# dependencies (bun install)
+node_modules
 
-# Virtual environments
-.venv
+# output
+out
+dist
+*.tgz
 
-# Local secrets and runtime state
+# code coverage
+coverage
+*.lcov
+
+# logs
+logs
+.pi-cloud
+_.log
+report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
+
+# dotenv environment variable files
 .env
+.env.development.local
+.env.test.local
+.env.production.local
 .env.local
+
+# caches
+.eslintcache
+.cache
+*.tsbuildinfo
+
+# IntelliJ based IDEs
+.idea
+
+# Finder (MacOS) folder config
+.DS_Store
