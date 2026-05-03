@@ -25,6 +25,8 @@ Quick install on a Linux server:
 sudo ./scripts/install.sh
 ```
 
+The installer checks/installs required host dependencies on apt-based Linux, including Bun, git, rsync, Docker when building the worker image, the host pi CLI for OAuth setup, and optionally Poke CLI/cloudflared via flags.
+
 Local/dev install:
 
 ```bash
