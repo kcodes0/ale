@@ -19,7 +19,29 @@ HTTP API is also available under `/api/tasks` for debugging/automation.
 
 ## Setup
 
-Quick install on a Linux server:
+### 1. Configure the service environment
+
+Create/edit the production env file before exposing the service:
+
+```bash
+sudo mkdir -p /etc/pi-cloud
+sudo cp .env.example /etc/pi-cloud/pi-cloud.env
+sudo chmod 600 /etc/pi-cloud/pi-cloud.env
+sudo nano /etc/pi-cloud/pi-cloud.env
+```
+
+Set at least:
+
+```env
+PI_CLOUD_API_KEY=replace-with-a-long-random-token
+POKE_API_KEY=replace-with-your-poke-key
+ALLOWED_REPOS=owner/repo,owner/other-repo=https://github.com/owner/other-repo.git
+PI_AGENT_HOME=/home/pi-cloud/.pi
+```
+
+### 2. Install the service
+
+From the repo root:
 
 ```bash
 sudo ./scripts/install.sh
@@ -27,7 +49,61 @@ sudo ./scripts/install.sh
 
 The installer checks/installs required host dependencies on apt-based Linux, including Bun, git, rsync, Docker when building the worker image, the host pi CLI for OAuth setup, and optionally Poke CLI/cloudflared via flags.
 
-Local/dev install:
+Verify systemd and the local health endpoint:
+
+```bash
+systemctl status pi-cloud.service --no-pager --full
+curl http://localhost:3000/health
+```
+
+Expected health output:
+
+```json
+{"ok":true,"jobs":0,"activeJobs":0}
+```
+
+If the service is not healthy, check logs:
+
+```bash
+sudo journalctl -u pi-cloud.service --no-pager -n 100
+```
+
+### 3. Configure pi auth for Docker workers
+
+Pi stores subscription OAuth credentials in `~/.pi/agent/auth.json`. The production service runs as the `pi-cloud` user, so the worker auth should live under `/home/pi-cloud/.pi`.
+
+Preferred interactive login:
+
+```bash
+sudo -u pi-cloud mkdir -p /home/pi-cloud/.pi/agent
+sudo -u pi-cloud HOME=/home/pi-cloud pi
+# inside pi, run /login and choose OpenAI Codex / ChatGPT, Claude, or Copilot
+```
+
+Then confirm this is set in `/etc/pi-cloud/pi-cloud.env`:
+
+```env
+PI_AGENT_HOME=/home/pi-cloud/.pi
+```
+
+Restart after auth/env changes:
+
+```bash
+sudo systemctl restart pi-cloud.service
+```
+
+Alternative if you already logged in as your current user:
+
+```bash
+sudo mkdir -p /home/pi-cloud/.pi
+sudo rsync -a ~/.pi/ /home/pi-cloud/.pi/
+sudo chown -R pi-cloud:pi-cloud /home/pi-cloud/.pi
+sudo chmod 700 /home/pi-cloud/.pi /home/pi-cloud/.pi/agent
+sudo chmod 600 /home/pi-cloud/.pi/agent/auth.json
+sudo systemctl restart pi-cloud.service
+```
+
+### Local/dev install
 
 ```bash
 bun install
@@ -36,32 +112,58 @@ cp .env.example .env
 bun run index.ts
 ```
 
-### ChatGPT OAuth / pi auth in Docker
+The service mounts `PI_AGENT_HOME` into each worker at `/home/pi/.pi`. If this is awkward, use API-key auth via environment variables instead, or run unsandboxed only for local development.
 
-Pi stores subscription OAuth credentials in `~/.pi/agent/auth.json`. To reuse ChatGPT/Codex OAuth in worker containers, login as the service user and set `PI_AGENT_HOME`:
-
-```bash
-sudo -u pi-cloud mkdir -p /home/pi-cloud/.pi/agent
-sudo -u pi-cloud HOME=/home/pi-cloud pi
-# run /login, choose OpenAI Codex / ChatGPT
-# then set PI_AGENT_HOME=/home/pi-cloud/.pi in /etc/pi-cloud/pi-cloud.env
-```
-
-The service mounts that directory into each worker at `/home/pi/.pi`. If this is awkward, use API-key auth via environment variables instead, or run unsandboxed only for local development.
+## Expose/register with Poke
 
 Register with Poke:
 
 ```bash
-poke mcp add https://your-server.com/mcp --name "Pi Cloud" --api-key "$PI_CLOUD_API_KEY"
+npx poke mcp add https://your-server.com/mcp --name "Pi Cloud" --api-key "$PI_CLOUD_API_KEY"
 ```
 
-For a dev URL, `poke tunnel` is fine:
+For a dev URL, `npx poke tunnel` is fine, but it normally stays attached to the terminal:
 
 ```bash
-poke tunnel http://localhost:3000/mcp --name "Pi Cloud"
+npx poke tunnel http://localhost:3000/mcp --name "Pi Cloud"
 ```
 
-For an always-on server, prefer Cloudflare Tunnel, a reverse proxy, or any HTTPS ingress in front of `localhost:3000`.
+For an always-on Poke tunnel, run it as a separate systemd service. Adjust `User`, paths, and Node path for your host:
+
+```ini
+# /etc/systemd/system/pi-cloud-tunnel.service
+[Unit]
+Description=Pi Cloud Poke Tunnel
+After=network-online.target pi-cloud.service
+Wants=network-online.target
+Requires=pi-cloud.service
+
+[Service]
+Type=simple
+User=claude
+Group=claude
+WorkingDirectory=/home/claude/ale
+Environment=HOME=/home/claude
+Environment=XDG_CONFIG_HOME=/home/claude/.config
+Environment=PATH=/home/claude/.nvm/versions/node/v24.15.0/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/claude/.nvm/versions/node/v24.15.0/bin/npx --yes poke tunnel http://localhost:3000/mcp --name "Pi Cloud"
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable it:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now pi-cloud-tunnel.service
+systemctl status pi-cloud-tunnel.service --no-pager --full
+sudo journalctl -u pi-cloud-tunnel.service --no-pager -n 100
+```
+
+For production you can also use Cloudflare Tunnel, a reverse proxy, or any HTTPS ingress in front of `localhost:3000`.
 
 ## Key configuration
 
