@@ -37,6 +37,10 @@ PI_CLOUD_API_KEY=replace-with-a-long-random-token
 POKE_API_KEY=replace-with-your-poke-key
 ALLOWED_REPOS=owner/repo,owner/other-repo=https://github.com/owner/other-repo.git
 PI_AGENT_HOME=/home/pi-cloud/.pi
+
+# Use true for direct public HTTPS MCP URLs.
+# Use false when exposing /mcp through `npx poke tunnel` / Poke Integrations.
+PI_CLOUD_REQUIRE_MCP_AUTH=true
 ```
 
 ### 2. Install the service
@@ -122,9 +126,16 @@ Register with Poke:
 npx poke mcp add https://your-server.com/mcp --name "Pi Cloud" --api-key "$PI_CLOUD_API_KEY"
 ```
 
-For a dev URL, `npx poke tunnel` is fine, but it normally stays attached to the terminal:
+For a dev URL, `npx poke tunnel` is fine, but it normally stays attached to the terminal. Because Poke tunnel does not forward `PI_CLOUD_API_KEY` to the local MCP endpoint, set this in `/etc/pi-cloud/pi-cloud.env` first:
+
+```env
+PI_CLOUD_REQUIRE_MCP_AUTH=false
+```
+
+Then restart the service and start the tunnel:
 
 ```bash
+sudo systemctl restart pi-cloud.service
 npx poke tunnel http://localhost:3000/mcp --name "Pi Cloud" --recipe
 ```
 
@@ -172,12 +183,13 @@ systemctl status pi-cloud-tunnel.service --no-pager --full
 sudo journalctl -u pi-cloud-tunnel.service --no-pager -n 100
 ```
 
-For production you can also use Cloudflare Tunnel, a reverse proxy, or any HTTPS ingress in front of `localhost:3000`.
+For production you can also use Cloudflare Tunnel, a reverse proxy, or any HTTPS ingress in front of `localhost:3000`. If you expose `/mcp` directly instead of through Poke tunnel, keep `PI_CLOUD_REQUIRE_MCP_AUTH=true` and register the MCP server with `--api-key "$PI_CLOUD_API_KEY"`.
 
 ## Key configuration
 
 - `ALLOWED_REPOS`: comma-separated repo allowlist, e.g. `owner/repo` or `owner/repo=https://github.com/owner/repo.git`.
-- `PI_CLOUD_API_KEY`: bearer token required for MCP/API requests.
+- `PI_CLOUD_API_KEY`: bearer token required for HTTP API requests and for MCP when `PI_CLOUD_REQUIRE_MCP_AUTH=true`.
+- `PI_CLOUD_REQUIRE_MCP_AUTH`: set `false` for Poke tunnel / Poke Integrations because the tunnel CLI does not forward this service's bearer token to localhost; keep `true` for direct public MCP URLs.
 - `PI_AGENT_IMAGE`: Docker image used for jobs. It should contain git, the pi CLI, auth/config, and needed toolchains.
 - `PI_RUNNER_COMMAND`: command executed in the checked-out repo inside the sandbox. Default: `pi -p "$PI_TASK_PROMPT"`.
 - `PI_AGENT_HOME`: optional host pi home, e.g. `/home/pi-cloud/.pi`, mounted into Docker as `/home/pi/.pi` so ChatGPT/Codex OAuth from `pi /login` can be reused.

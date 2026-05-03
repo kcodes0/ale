@@ -35,6 +35,7 @@ const config = {
   port: Number(process.env.PORT ?? 3000),
   publicBaseUrl: process.env.PUBLIC_BASE_URL ?? `http://localhost:${process.env.PORT ?? 3000}`,
   apiKey: process.env.PI_CLOUD_API_KEY,
+  requireMcpAuth: process.env.PI_CLOUD_REQUIRE_MCP_AUTH !== "false",
   workspacesDir: process.env.WORKSPACES_DIR ?? path.join(process.cwd(), ".pi-cloud", "workspaces"),
   logsDir: process.env.LOGS_DIR ?? path.join(process.cwd(), ".pi-cloud", "logs"),
   maxConcurrentJobs: Number(process.env.MAX_CONCURRENT_JOBS ?? 1),
@@ -334,7 +335,9 @@ async function handleHttp(req: Request) {
   const url = new URL(req.url);
   if (url.pathname === "/health") return json({ ok: true, jobs: jobs.size, activeJobs });
   if (url.pathname === "/mcp") {
-    const auth = requireAuth(req); if (auth) return auth;
+    if (config.requireMcpAuth) {
+      const auth = requireAuth(req); if (auth) return auth;
+    }
     const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
     const server = mcpServer();
     await server.connect(transport);
