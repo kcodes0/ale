@@ -125,7 +125,7 @@ npx poke mcp add https://your-server.com/mcp --name "Pi Cloud" --api-key "$PI_CL
 For a dev URL, `npx poke tunnel` is fine, but it normally stays attached to the terminal:
 
 ```bash
-npx poke tunnel http://localhost:3000/mcp --name "Pi Cloud"
+npx poke tunnel http://localhost:3000/mcp --name "Pi Cloud" --recipe
 ```
 
 For an always-on Poke tunnel, run it as a separate systemd service. Adjust `User`, paths, and Node path for your host:
@@ -146,7 +146,7 @@ WorkingDirectory=/home/claude/ale
 Environment=HOME=/home/claude
 Environment=XDG_CONFIG_HOME=/home/claude/.config
 Environment=PATH=/home/claude/.nvm/versions/node/v24.15.0/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/home/claude/.nvm/versions/node/v24.15.0/bin/npx --yes poke tunnel http://localhost:3000/mcp --name "Pi Cloud"
+ExecStart=/home/claude/.nvm/versions/node/v24.15.0/bin/npx --yes poke tunnel http://localhost:3000/mcp --name "Pi Cloud" --recipe
 Restart=always
 RestartSec=5
 
@@ -159,6 +159,15 @@ Enable it:
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now pi-cloud-tunnel.service
+systemctl status pi-cloud-tunnel.service --no-pager --full
+sudo journalctl -u pi-cloud-tunnel.service --no-pager -n 100
+```
+
+When `--recipe` is enabled, the tunnel logs include a `Recipe: https://poke.com/r/...` link and QR code. Before treating a 404 or "Recipe not found" page as a broken setup, check the Poke app's **Integrations** tab first. The tunnel-created MCP integration may already be installed/listed there even if the generated recipe link does not render as a public recipe page.
+
+Troubleshoot further only if the integration is missing or the tunnel service is not active:
+
+```bash
 systemctl status pi-cloud-tunnel.service --no-pager --full
 sudo journalctl -u pi-cloud-tunnel.service --no-pager -n 100
 ```
