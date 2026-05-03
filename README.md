@@ -33,15 +33,19 @@ sudo nano /etc/pi-cloud/pi-cloud.env
 Set at least:
 
 ```env
-PI_CLOUD_API_KEY=replace-with-a-long-random-token
 POKE_API_KEY=replace-with-your-poke-key
 ALLOWED_REPOS=owner/repo,owner/other-repo=https://github.com/owner/other-repo.git
 PI_AGENT_HOME=/home/pi-cloud/.pi
 
-# Use true for direct public HTTPS MCP URLs.
-# Use false when exposing /mcp through `npx poke tunnel` / Poke Integrations.
-PI_CLOUD_REQUIRE_MCP_AUTH=true
+# Local Poke tunnel / Poke Integrations: no Pi Cloud API key is needed for MCP.
+PI_CLOUD_REQUIRE_MCP_AUTH=false
+
+# Direct public HTTPS/domain deployment: set an API key and require it for MCP.
+# PI_CLOUD_API_KEY=replace-with-a-long-random-token
+# PI_CLOUD_REQUIRE_MCP_AUTH=true
 ```
+
+If you are running locally and exposing the service through `npx poke tunnel`, you generally do **not** need to create a `PI_CLOUD_API_KEY` for Pi Cloud's MCP endpoint. Consider enabling `PI_CLOUD_API_KEY` + `PI_CLOUD_REQUIRE_MCP_AUTH=true` when deploying to a commercial hosting service, an official domain, or any directly public `/mcp` URL.
 
 ### 2. Install the service
 
