@@ -6,6 +6,7 @@ APP_DIR="${APP_DIR:-/opt/${APP_NAME}}"
 ENV_DIR="${ENV_DIR:-/etc/pi-cloud}"
 ENV_FILE="${ENV_FILE:-${ENV_DIR}/pi-cloud.env}"
 SERVICE_USER="${SERVICE_USER:-pi-cloud}"
+SERVICE_GROUP="${SERVICE_GROUP:-${SERVICE_USER}}"
 BUILD_IMAGE="${BUILD_IMAGE:-true}"
 INSTALL_SYSTEMD="${INSTALL_SYSTEMD:-auto}"
 INSTALL_DOCKER="${INSTALL_DOCKER:-auto}"
@@ -162,18 +163,26 @@ fi
 
 if [[ "${INSTALL_SYSTEMD}" == "true" ]]; then
   is_root || fail "systemd installation requires root"
-  log "Creating service user ${SERVICE_USER}"
+  log "Configuring service user ${SERVICE_USER}"
   if ! id "${SERVICE_USER}" >/dev/null 2>&1; then
     useradd --system --create-home --shell /usr/sbin/nologin "${SERVICE_USER}"
+    SERVICE_GROUP="${SERVICE_USER}"
+  elif [[ "${SERVICE_GROUP}" == "${SERVICE_USER}" ]]; then
+    SERVICE_GROUP="$(id -gn "${SERVICE_USER}")"
   fi
   if getent group docker >/dev/null 2>&1; then
     usermod -aG docker "${SERVICE_USER}" || true
   else
     warn "docker group not found; the service user may not be able to run containers"
   fi
-  chown -R "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}/.pi-cloud"
+  chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "${APP_DIR}/.pi-cloud"
   cp deploy/pi-cloud.service /etc/systemd/system/pi-cloud.service
-  sed -i "s#WorkingDirectory=/opt/pi-cloud-delegation-service#WorkingDirectory=${APP_DIR}#" /etc/systemd/system/pi-cloud.service
+  sed -i \
+    -e "s#WorkingDirectory=/opt/pi-cloud-delegation-service#WorkingDirectory=${APP_DIR}#" \
+    -e "s#User=pi-cloud#User=${SERVICE_USER}#" \
+    -e "s#Group=pi-cloud#Group=${SERVICE_GROUP}#" \
+    -e "s#ReadWritePaths=/opt/pi-cloud-delegation-service/.pi-cloud /etc/pi-cloud#ReadWritePaths=${APP_DIR}/.pi-cloud ${ENV_DIR} /home/${SERVICE_USER}/.pi#" \
+    /etc/systemd/system/pi-cloud.service
   systemctl daemon-reload
   systemctl enable pi-cloud.service
   log "Starting pi-cloud.service"

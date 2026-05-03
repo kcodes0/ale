@@ -55,6 +55,19 @@ From the repo root:
 sudo ./scripts/install.sh
 ```
 
+By default this creates/runs a dedicated `pi-cloud` service user. For a more ergonomic single-user local setup, run the service as your current user and keep workspaces/logs in this checkout:
+
+```bash
+sudo SERVICE_USER="$USER" APP_DIR="$PWD" ./scripts/install.sh
+```
+
+In that mode, jobs/logs live under:
+
+```text
+./.pi-cloud/workspaces
+./.pi-cloud/logs
+```
+
 The installer checks/installs required host dependencies on apt-based Linux, including Bun, git, rsync, Docker when building the worker image, the host pi CLI for OAuth setup, and optionally Poke CLI/cloudflared via flags.
 
 Verify systemd and the local health endpoint:
