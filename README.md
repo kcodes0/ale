@@ -205,7 +205,7 @@ For production you can also use Cloudflare Tunnel, a reverse proxy, or any HTTPS
 ## Key configuration
 
 - `ALLOWED_REPOS`: comma-separated repo allowlist, e.g. `owner/repo` or `owner/repo=https://github.com/owner/repo.git`.
-- `PI_CLOUD_API_KEY`: bearer token required for HTTP API requests and for MCP when `PI_CLOUD_REQUIRE_MCP_AUTH=true`.
+- `PI_CLOUD_API_KEY`: bearer token required for HTTP API requests. Also required for MCP when `PI_CLOUD_REQUIRE_MCP_AUTH=true`. HTTP API endpoints fail closed with `503` if this key is unset.
 - `PI_CLOUD_REQUIRE_MCP_AUTH`: set `false` for Poke tunnel / Poke Integrations because the tunnel CLI does not forward this service's bearer token to localhost; keep `true` for direct public MCP URLs.
 - `PI_AGENT_IMAGE`: Docker image used for jobs. It should contain git, the pi CLI, auth/config, and needed toolchains.
 - `PI_RUNNER_COMMAND`: command executed in the checked-out repo inside the sandbox. Default: `pi -p "$PI_TASK_PROMPT"`.
@@ -217,11 +217,12 @@ For production you can also use Cloudflare Tunnel, a reverse proxy, or any HTTPS
 
 - Repos are allowlisted.
 - Each job gets a fresh workspace under `.pi-cloud/workspaces`.
+- Job metadata is persisted to `.pi-cloud/jobs.json` so status/history survives service restarts; in-flight `running` jobs are marked failed on restart because their process/container was interrupted.
 - Jobs run in Docker by default.
 - Workers include `git` and GitHub CLI (`gh`). When `GITHUB_TOKEN` is configured, prompts instruct agents to push useful changes to a branch and open a PR instead of leaving work only in the local workspace.
 - Runtime and concurrency are capped.
 - Deploy/destructive/secret-looking tasks enter `awaiting_approval` until `approve_pi_task_action` is called.
-- Logs are captured under `.pi-cloud/logs`.
+- Logs are appended under `.pi-cloud/logs`.
 
 Do not run production jobs with `PI_CLOUD_ALLOW_UNSANDBOXED=true`; it is for local development only.
 

@@ -1,4 +1,4 @@
-import { chmod, mkdir, rm, readFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, rename, rm, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { Poke } from "poke";
@@ -38,6 +38,7 @@ const config = {
   requireMcpAuth: process.env.PI_CLOUD_REQUIRE_MCP_AUTH !== "false",
   workspacesDir: process.env.WORKSPACES_DIR ?? path.join(process.cwd(), ".pi-cloud", "workspaces"),
   logsDir: process.env.LOGS_DIR ?? path.join(process.cwd(), ".pi-cloud", "logs"),
+  jobsFile: process.env.JOBS_FILE ?? path.join(process.cwd(), ".pi-cloud", "jobs.json"),
   maxConcurrentJobs: Number(process.env.MAX_CONCURRENT_JOBS ?? 1),
   maxRuntimeMs: Number(process.env.MAX_RUNTIME_MS ?? 30 * 60 * 1000),
   useDocker: process.env.PI_CLOUD_USE_DOCKER !== "false",
@@ -65,7 +66,7 @@ function parseAllowedRepos(raw: string): Map<string, string> {
 }
 
 function requireAuth(req: Request): Response | undefined {
-  if (!config.apiKey) return;
+  if (!config.apiKey) return json({ error: "PI_CLOUD_API_KEY is required for this endpoint" }, 503);
   const auth = req.headers.get("authorization");
   const bearer = auth?.startsWith("Bearer ") ? auth.slice("Bearer ".length) : undefined;
   if (bearer !== config.apiKey) return json({ error: "unauthorized" }, 401);
@@ -96,7 +97,32 @@ function logPath(jobId: string) {
 async function appendLog(job: Job, line: string) {
   await mkdir(config.logsDir, { recursive: true });
   const stamped = `[${new Date().toISOString()}] ${line}\n`;
-  await Bun.write(logPath(job.id), (existsSync(logPath(job.id)) ? await readFile(logPath(job.id), "utf8") : "") + stamped);
+  await appendFile(logPath(job.id), stamped);
+}
+
+async function persistJobs() {
+  await mkdir(path.dirname(config.jobsFile), { recursive: true });
+  const payload = JSON.stringify([...jobs.values()].map(publicJob), null, 2);
+  const tmp = `${config.jobsFile}.${crypto.randomUUID()}.tmp`;
+  await writeFile(tmp, `${payload}\n`);
+  await rename(tmp, config.jobsFile);
+}
+
+async function loadJobs() {
+  if (!existsSync(config.jobsFile)) return;
+  const stored = JSON.parse(await readFile(config.jobsFile, "utf8")) as Array<Omit<Job, "process" | "controller">>;
+  let recovered = false;
+  for (const saved of stored) {
+    const job: Job = { ...saved };
+    if (job.status === "running") {
+      job.status = "failed";
+      job.error = "service restarted while job was running";
+      job.finishedAt = job.updatedAt = new Date().toISOString();
+      recovered = true;
+    }
+    jobs.set(job.id, job);
+  }
+  if (recovered) await persistJobs();
 }
 
 function requiresApproval(mode: TaskMode, task: string) {
@@ -130,22 +156,28 @@ async function startPiTask(input: { repo: string; task: string; mode?: TaskMode;
   }
 
   jobs.set(job.id, job);
+  await persistJobs();
   await appendLog(job, `created for ${job.repo} (${job.mode}/${job.priority})`);
   if (job.status === "queued") queueMicrotask(processQueue);
   return publicJob(job);
 }
 
 function processQueue() {
-  if (activeJobs >= config.maxConcurrentJobs) return;
-  const next = [...jobs.values()]
-    .filter((j) => j.status === "queued")
-    .sort((a, b) => priorityValue(b.priority) - priorityValue(a.priority) || a.createdAt.localeCompare(b.createdAt))[0];
-  if (!next) return;
-  activeJobs++;
-  void runJob(next).finally(() => {
-    activeJobs--;
-    processQueue();
-  });
+  while (activeJobs < config.maxConcurrentJobs) {
+    const next = [...jobs.values()]
+      .filter((j) => j.status === "queued")
+      .sort((a, b) => priorityValue(b.priority) - priorityValue(a.priority) || a.createdAt.localeCompare(b.createdAt))[0];
+    if (!next) return;
+    next.status = "running";
+    next.startedAt = next.updatedAt = new Date().toISOString();
+    next.workspace = path.join(config.workspacesDir, next.id);
+    activeJobs++;
+    void persistJobs();
+    void runJob(next).finally(() => {
+      activeJobs--;
+      processQueue();
+    });
+  }
 }
 
 function priorityValue(p: Priority) {
@@ -155,9 +187,11 @@ function priorityValue(p: Priority) {
 async function runJob(job: Job) {
   const repoUrl = config.allowedRepos.get(job.repo)!;
   job.status = "running";
-  job.startedAt = job.updatedAt = new Date().toISOString();
-  job.workspace = path.join(config.workspacesDir, job.id);
+  job.startedAt ??= new Date().toISOString();
+  job.updatedAt = new Date().toISOString();
+  job.workspace ??= path.join(config.workspacesDir, job.id);
   job.controller = new AbortController();
+  await persistJobs();
   await appendLog(job, "starting workspace");
 
   const timeout = setTimeout(() => {
@@ -195,6 +229,7 @@ async function runJob(job: Job) {
     job.finishedAt = job.updatedAt = new Date().toISOString();
     job.process = undefined;
     job.controller = undefined;
+    await persistJobs();
   }
 }
 
@@ -203,22 +238,21 @@ function buildPiPrompt(job: Job) {
 }
 
 async function cloneRepo(job: Job, repoUrl: string) {
-  await runCommand(job, "git", ["clone", "--depth", "1", authRepoUrl(repoUrl), "."], job.workspace!, githubEnv());
+  await runCommand(job, "git", cloneArgs(repoUrl), job.workspace!, githubEnv());
 }
 
-function authRepoUrl(repoUrl: string) {
-  if (!config.githubToken) return repoUrl;
+function cloneArgs(repoUrl: string) {
+  if (!config.githubToken) return ["clone", "--depth", "1", repoUrl, "."];
   try {
     const url = new URL(repoUrl);
     if (url.protocol === "https:" && /(^|\.)github\.com$/i.test(url.hostname)) {
-      url.username = "x-access-token";
-      url.password = config.githubToken;
-      return url.toString();
+      const basic = Buffer.from(`x-access-token:${config.githubToken}`).toString("base64");
+      return ["-c", `http.https://github.com/.extraheader=AUTHORIZATION: basic ${basic}`, "clone", "--depth", "1", repoUrl, "."];
     }
   } catch {
     // Non-URL repo specs (for example SSH remotes) are passed through unchanged.
   }
-  return repoUrl;
+  return ["clone", "--depth", "1", repoUrl, "."];
 }
 
 function githubEnv(): Record<string, string> {
@@ -231,6 +265,18 @@ function githubEnv(): Record<string, string> {
     GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME ?? process.env.GIT_AUTHOR_NAME ?? "pi-cloud",
     GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL ?? process.env.GIT_AUTHOR_EMAIL ?? "pi-cloud@users.noreply.github.com",
   };
+}
+
+function redactSecrets(text: string) {
+  let redacted = text;
+  for (const secret of secretMasks()) redacted = redacted.replaceAll(secret, "***");
+  return redacted;
+}
+
+function secretMasks() {
+  const masks = [config.githubToken].filter((s): s is string => Boolean(s));
+  if (config.githubToken) masks.push(Buffer.from(`x-access-token:${config.githubToken}`).toString("base64"));
+  return masks;
 }
 
 async function runDockerPi(job: Job, prompt: string) {
@@ -254,7 +300,7 @@ async function runDockerPi(job: Job, prompt: string) {
 }
 
 async function runCommand(job: Job, cmd: string, args: string[], cwd: string, env: Record<string, string> = {}) {
-  await appendLog(job, `$ ${cmd} ${args.map((a) => a.includes(" ") ? JSON.stringify(a) : a).join(" ")}`.replaceAll(config.githubToken ?? "__NO_TOKEN__", "***"));
+  await appendLog(job, redactSecrets(`$ ${cmd} ${args.map((a) => a.includes(" ") ? JSON.stringify(a) : a).join(" ")}`));
   const proc = Bun.spawn([cmd, ...args], {
     cwd,
     env: { ...process.env, ...env },
@@ -274,7 +320,7 @@ async function pipeToLog(job: Job, stream: ReadableStream<Uint8Array>) {
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    if (value) await appendLog(job, value.replaceAll(config.githubToken ?? "__NO_TOKEN__", "***").trimEnd());
+    if (value) await appendLog(job, redactSecrets(value).trimEnd());
   }
 }
 
@@ -286,6 +332,7 @@ async function cancelPiTask(jobId: string) {
   job.updatedAt = job.finishedAt = new Date().toISOString();
   job.controller?.abort();
   job.process?.kill();
+  await persistJobs();
   await appendLog(job, "cancelled");
   return publicJob(job);
 }
@@ -299,6 +346,7 @@ async function approvePiTaskAction(jobId: string, action = "start", approved = t
   job.status = "queued";
   job.approvalRequired = false;
   job.updatedAt = new Date().toISOString();
+  await persistJobs();
   await appendLog(job, "approved and queued");
   queueMicrotask(processQueue);
   return publicJob(job);
@@ -401,6 +449,8 @@ async function handleHttp(req: Request) {
 
 await mkdir(config.workspacesDir, { recursive: true });
 await mkdir(config.logsDir, { recursive: true });
+await loadJobs();
+queueMicrotask(processQueue);
 
 Bun.serve({ port: config.port, fetch: handleHttp });
 console.log(`Pi Cloud Delegation Service listening on ${config.publicBaseUrl}`);
