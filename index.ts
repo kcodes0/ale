@@ -169,7 +169,7 @@ async function runJob(job: Job) {
     await rm(job.workspace, { recursive: true, force: true });
     await mkdir(job.workspace, { recursive: true });
     await chmod(job.workspace, 0o777);
-    await runCommand(job, "git", ["clone", "--depth", "1", repoUrl, "."], job.workspace);
+    await cloneRepo(job, repoUrl);
 
     const prompt = buildPiPrompt(job);
     if (config.useDocker) await runDockerPi(job, prompt);
@@ -199,22 +199,58 @@ async function runJob(job: Job) {
 }
 
 function buildPiPrompt(job: Job) {
-  return `You are running in a controlled Pi Cloud Delegation job.\n\nRepo: ${job.repo}\nMode: ${job.mode}\nJob: ${job.id}\n\nTask:\n${job.task}\n\nRules:\n- Work only inside the checked-out repository.\n- Prefer opening a GitHub PR over direct pushes to protected branches.\n- Do not access or print secrets.\n- Do not run production deploys or destructive infra commands unless explicitly approved in the job instructions.\n- Run relevant tests and provide a concise final summary with changed files and PR URL if created.`;
+  return `You are running in a controlled Pi Cloud Delegation job.\n\nRepo: ${job.repo}\nMode: ${job.mode}\nJob: ${job.id}\n\nTask:\n${job.task}\n\nRules:\n- Work only inside the checked-out repository.\n- Use git and gh CLI tooling for repository changes.\n- If you make code/doc changes and GITHUB_TOKEN/GH_TOKEN is available, create a branch, commit the changes, push the branch, and open a GitHub PR. Do not leave useful work only in the local workspace.\n- Prefer opening a GitHub PR over direct pushes to protected branches.\n- Do not access or print secrets.\n- Do not run production deploys or destructive infra commands unless explicitly approved in the job instructions.\n- Run relevant tests and provide a concise final summary with changed files and PR URL if created.`;
+}
+
+async function cloneRepo(job: Job, repoUrl: string) {
+  await runCommand(job, "git", ["clone", "--depth", "1", authRepoUrl(repoUrl), "."], job.workspace!, githubEnv());
+}
+
+function authRepoUrl(repoUrl: string) {
+  if (!config.githubToken) return repoUrl;
+  try {
+    const url = new URL(repoUrl);
+    if (url.protocol === "https:" && /(^|\.)github\.com$/i.test(url.hostname)) {
+      url.username = "x-access-token";
+      url.password = config.githubToken;
+      return url.toString();
+    }
+  } catch {
+    // Non-URL repo specs (for example SSH remotes) are passed through unchanged.
+  }
+  return repoUrl;
+}
+
+function githubEnv(): Record<string, string> {
+  if (!config.githubToken) return {};
+  return {
+    GITHUB_TOKEN: config.githubToken,
+    GH_TOKEN: config.githubToken,
+    GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME ?? "pi-cloud",
+    GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL ?? "pi-cloud@users.noreply.github.com",
+    GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME ?? process.env.GIT_AUTHOR_NAME ?? "pi-cloud",
+    GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL ?? process.env.GIT_AUTHOR_EMAIL ?? "pi-cloud@users.noreply.github.com",
+  };
 }
 
 async function runDockerPi(job: Job, prompt: string) {
   const name = `pi-cloud-${job.id}`;
+  const setupCommand = [
+    "git config --global --add safe.directory /workspace",
+    "git config --global user.name \"${GIT_COMMITTER_NAME:-pi-cloud}\"",
+    "git config --global user.email \"${GIT_COMMITTER_EMAIL:-pi-cloud@users.noreply.github.com}\"",
+  ].join(" && ");
   await runCommand(job, "docker", [
     "run", "--rm", "--name", name,
     "-v", `${job.workspace}:/workspace`,
     "-w", "/workspace",
     "-e", "PI_TASK_PROMPT",
     "-e", "HOME=/home/pi",
-    ...(config.githubToken ? ["-e", "GITHUB_TOKEN"] : []),
+    ...(config.githubToken ? ["-e", "GITHUB_TOKEN", "-e", "GH_TOKEN", "-e", "GIT_AUTHOR_NAME", "-e", "GIT_AUTHOR_EMAIL", "-e", "GIT_COMMITTER_NAME", "-e", "GIT_COMMITTER_EMAIL"] : []),
     ...(config.piAgentHome ? ["-v", `${path.resolve(config.piAgentHome)}:/home/pi/.pi`] : []),
     config.dockerImage,
-    "sh", "-lc", config.runnerCommand,
-  ], job.workspace!, { PI_TASK_PROMPT: prompt, ...(config.githubToken ? { GITHUB_TOKEN: config.githubToken } : {}) });
+    "sh", "-lc", `${setupCommand} && ${config.runnerCommand}`,
+  ], job.workspace!, { PI_TASK_PROMPT: prompt, ...githubEnv() });
 }
 
 async function runCommand(job: Job, cmd: string, args: string[], cwd: string, env: Record<string, string> = {}) {

@@ -210,6 +210,7 @@ For production you can also use Cloudflare Tunnel, a reverse proxy, or any HTTPS
 - `PI_AGENT_IMAGE`: Docker image used for jobs. It should contain git, the pi CLI, auth/config, and needed toolchains.
 - `PI_RUNNER_COMMAND`: command executed in the checked-out repo inside the sandbox. Default: `pi -p "$PI_TASK_PROMPT"`.
 - `PI_AGENT_HOME`: optional host pi home, e.g. `/home/pi-cloud/.pi`, mounted into Docker as `/home/pi/.pi` so ChatGPT/Codex OAuth from `pi /login` can be reused.
+- `GITHUB_TOKEN`: optional but recommended for private repos and automatic PR creation. The service uses it for authenticated GitHub HTTPS clones and passes it into worker containers as both `GITHUB_TOKEN` and `GH_TOKEN`, so agents can use `git` and `gh` to create branches, push commits, and open PRs. Use a fine-scoped token with access only to the allowed repos.
 - `POKE_API_KEY`: optional; enables completion/failure notifications via the Poke inbound API / SDK fallback.
 
 ## Safety behavior
@@ -217,6 +218,7 @@ For production you can also use Cloudflare Tunnel, a reverse proxy, or any HTTPS
 - Repos are allowlisted.
 - Each job gets a fresh workspace under `.pi-cloud/workspaces`.
 - Jobs run in Docker by default.
+- Workers include `git` and GitHub CLI (`gh`). When `GITHUB_TOKEN` is configured, prompts instruct agents to push useful changes to a branch and open a PR instead of leaving work only in the local workspace.
 - Runtime and concurrency are capped.
 - Deploy/destructive/secret-looking tasks enter `awaiting_approval` until `approve_pi_task_action` is called.
 - Logs are captured under `.pi-cloud/logs`.
